@@ -84,13 +84,63 @@ var _ = DescribeTable("Provisioning",
 		InstanceTypes: []string{"c4a-standard-2", "c4a-standard-4", "t2a-standard-2"},
 		ImageFamily:   gcpv1alpha1.ImageFamilyUbuntu,
 	}, SpecTimeout(15*time.Minute)),
-	// Local SSDs — verifies that `disks: [{category: local-ssd}, ...]` on the
-	// GCENodeClass results in NVMe SCRATCH disks attached to the GCE VM.
-	Entry("COS / amd64 / on-demand + 2 local SSDs", environment.TestCase{
+	// Legacy disk-entry path: `disks: [{category: local-ssd}, ...]` still
+	// produces NVMe SCRATCH disks (regression guard for the SCRATCH-attach
+	// fix; deprecated in v1alpha1, removed at v1beta1).
+	Entry("COS / amd64 / on-demand + 2 local SSDs (legacy)", environment.TestCase{
 		CapacityType:  karpv1.CapacityTypeOnDemand,
 		Arch:          karpv1.ArchitectureAmd64,
 		Families:      []string{"n2"},
 		InstanceTypes: []string{"n2-standard-2"},
 		LocalSSDCount: 2,
+	}, SpecTimeout(15*time.Minute)),
+
+	// Top-level LocalSsdMode / LocalSsdCount path. Flex families (n2d):
+	// user picks the count.
+	Entry("flex n2d / RawBlock / 1 SSD", environment.TestCase{
+		CapacityType:  karpv1.CapacityTypeOnDemand,
+		Arch:          karpv1.ArchitectureAmd64,
+		Families:      []string{"n2d"},
+		InstanceTypes: []string{"n2d-standard-8"},
+		LocalSSDMode:  gcpv1alpha1.LocalSSDModeRawBlock,
+		LocalSSDCount: 1,
+	}, SpecTimeout(15*time.Minute)),
+	Entry("flex n2d / Ephemeral / 2 SSDs", environment.TestCase{
+		CapacityType:  karpv1.CapacityTypeOnDemand,
+		Arch:          karpv1.ArchitectureAmd64,
+		Families:      []string{"n2d"},
+		InstanceTypes: []string{"n2d-standard-8"},
+		LocalSSDMode:  gcpv1alpha1.LocalSSDModeEphemeral,
+		LocalSSDCount: 2,
+	}, SpecTimeout(15*time.Minute)),
+
+	// Bundled-SSD families: count is fixed by the machine type. User must
+	// leave LocalSsdCount unset; LocalSsdMode still controls exposure.
+	Entry("bundled c4d-standard-8-lssd / RawBlock", environment.TestCase{
+		CapacityType:         karpv1.CapacityTypeOnDemand,
+		Arch:                 karpv1.ArchitectureAmd64,
+		Families:             []string{"c4d"},
+		InstanceTypes:        []string{"c4d-standard-8-lssd"},
+		BootDiskCategory:     "hyperdisk-balanced",
+		LocalSSDMode:         gcpv1alpha1.LocalSSDModeRawBlock,
+		ExpectedScratchDisks: 1,
+	}, SpecTimeout(15*time.Minute)),
+	Entry("bundled c4d-standard-8-lssd / Ephemeral", environment.TestCase{
+		CapacityType:         karpv1.CapacityTypeOnDemand,
+		Arch:                 karpv1.ArchitectureAmd64,
+		Families:             []string{"c4d"},
+		InstanceTypes:        []string{"c4d-standard-8-lssd"},
+		BootDiskCategory:     "hyperdisk-balanced",
+		LocalSSDMode:         gcpv1alpha1.LocalSSDModeEphemeral,
+		ExpectedScratchDisks: 1,
+	}, SpecTimeout(15*time.Minute)),
+	Entry("bundled z3-highmem-22-standardlssd / Ephemeral", environment.TestCase{
+		CapacityType:         karpv1.CapacityTypeOnDemand,
+		Arch:                 karpv1.ArchitectureAmd64,
+		Families:             []string{"z3"},
+		InstanceTypes:        []string{"z3-highmem-22-standardlssd"},
+		BootDiskCategory:     "hyperdisk-balanced",
+		LocalSSDMode:         gcpv1alpha1.LocalSSDModeEphemeral,
+		ExpectedScratchDisks: 1,
 	}, SpecTimeout(15*time.Minute)),
 )

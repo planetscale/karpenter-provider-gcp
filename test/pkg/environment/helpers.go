@@ -74,6 +74,18 @@ type TestCase struct {
 	// local SSDs (n1, n2, n2d, c2, c2d, c3, c3d, m3, a2/a3/a4) and at counts
 	// the family allows (n2: 1, 2, 4, 8, 16, 24).
 	LocalSSDCount int
+	// LocalSSDMode selects how local SSDs are exposed when the top-level
+	// spec.localSsdCount / spec.localSsdMode path is exercised. Empty means
+	// the legacy disks-entry path is used (mirrors pre-top-level behavior).
+	LocalSSDMode gcpv1alpha1.LocalSSDMode
+	// BootDiskCategory overrides the boot disk category. Empty means pd-balanced.
+	// Set to "hyperdisk-balanced" for c4*/z3 families that require it.
+	BootDiskCategory string
+	// ExpectedScratchDisks asserts the number of SCRATCH NVMe disks attached
+	// to the resulting GCE instance. Used on bundled-SSD families where the
+	// user-facing LocalSSDCount is 0 but the machine type bundles SSDs.
+	// When 0, verification falls back to LocalSSDCount.
+	ExpectedScratchDisks int
 }
 
 // UniqueSuffix returns a 6-character random hex string safe for use in k8s names.
@@ -147,6 +159,48 @@ func (e *Environment) CreateNodeClassWithLocalSSDs(ctx context.Context, name, im
 			"disks":           disks,
 			"subnetRangeName": e.PodsRangeName,
 		},
+	}}
+	_, err := e.DynamicClient.Resource(gceNodeClassGVR).Create(ctx, obj, metav1.CreateOptions{})
+	Expect(err).NotTo(HaveOccurred(), "creating GCENodeClass %s", name)
+	e.trackNodeClass(name)
+}
+
+// CreateNodeClassForLocalSSD creates a GCENodeClass using the top-level
+// spec.localSsdMode + spec.localSsdCount shape. Count==0 is valid for
+// bundled-SSD families where the machine type drives the count; mode
+// still applies. bootDiskCategory defaults to pd-balanced when empty.
+func (e *Environment) CreateNodeClassForLocalSSD(
+	ctx context.Context, name, imageFamily, bootDiskCategory string,
+	mode gcpv1alpha1.LocalSSDMode, count int32,
+) {
+	diskGiB := int64(DefaultE2EDiskGiB)
+	if imageFamily == gcpv1alpha1.ImageFamilyUbuntu {
+		diskGiB = 50
+	}
+	if bootDiskCategory == "" {
+		bootDiskCategory = "pd-balanced"
+	}
+	deleteIfExists(ctx, e.DynamicClient, gceNodeClassGVR, name)
+	spec := map[string]any{
+		"imageSelectorTerms": []any{
+			map[string]any{"alias": imageFamily + "@latest"},
+		},
+		"disks": []any{
+			map[string]any{"category": bootDiskCategory, "sizeGiB": diskGiB, "boot": true},
+		},
+		"subnetRangeName": e.PodsRangeName,
+	}
+	if mode != "" {
+		spec["localSsdMode"] = string(mode)
+	}
+	if count > 0 {
+		spec["localSsdCount"] = int64(count)
+	}
+	obj := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "karpenter.k8s.gcp/v1alpha1",
+		"kind":       "GCENodeClass",
+		"metadata":   map[string]any{"name": name},
+		"spec":       spec,
 	}}
 	_, err := e.DynamicClient.Resource(gceNodeClassGVR).Create(ctx, obj, metav1.CreateOptions{})
 	Expect(err).NotTo(HaveOccurred(), "creating GCENodeClass %s", name)
