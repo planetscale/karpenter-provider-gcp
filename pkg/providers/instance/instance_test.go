@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -617,6 +618,69 @@ func TestRenderDiskProperties_SetsBothIOPSAndThroughput(t *testing.T) {
 	require.Len(t, disks, 1)
 	require.Equal(t, int64(10000), disks[0].InitializeParams.ProvisionedIops)
 	require.Equal(t, int64(400), disks[0].InitializeParams.ProvisionedThroughput)
+}
+
+// countScratch counts SCRATCH-type AttachedDisks that look like local-SSD
+// scratch disks (NVMe interface, no DiskSizeGb, local-ssd diskType).
+func countScratch(disks []*compute.AttachedDisk) int {
+	n := 0
+	for _, d := range disks {
+		if d.Type == "SCRATCH" && d.Interface == "NVME" &&
+			d.InitializeParams != nil && d.InitializeParams.DiskSizeGb == 0 &&
+			strings.HasSuffix(d.InitializeParams.DiskType, "/diskTypes/local-ssd") {
+			n++
+		}
+	}
+	return n
+}
+
+func TestRenderDiskProperties_LocalSsdCountEmitsScratchDisks(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name             string
+		localSsdCount    int32
+		legacyEntries    int
+		wantScratchCount int
+	}{
+		{name: "no SSDs at all", localSsdCount: 0, legacyEntries: 0, wantScratchCount: 0},
+		{name: "LocalSsdCount=2, no legacy entries", localSsdCount: 2, legacyEntries: 0, wantScratchCount: 2},
+		{name: "legacy 2 entries, no top-level count", localSsdCount: 0, legacyEntries: 2, wantScratchCount: 2},
+		{
+			// Top-level wins; legacy entries are ignored so we don't double-count.
+			name: "top-level 3 overrides 1 legacy entry", localSsdCount: 3, legacyEntries: 1, wantScratchCount: 3,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			nc := &v1alpha1.GCENodeClass{
+				Spec: v1alpha1.GCENodeClassSpec{
+					LocalSsdCount: tc.localSsdCount,
+					Disks: []v1alpha1.Disk{
+						{Boot: true, SizeGiB: 50, Category: "pd-balanced"},
+					},
+				},
+				Status: v1alpha1.GCENodeClassStatus{
+					Images: []v1alpha1.Image{{
+						SourceImage: "projects/my-project/global/images/my-image",
+						Requirements: []corev1.NodeSelectorRequirement{{
+							Key: corev1.LabelArchStable, Operator: corev1.NodeSelectorOpIn, Values: []string{"amd64"},
+						}},
+					}},
+				},
+			}
+			for i := 0; i < tc.legacyEntries; i++ {
+				nc.Spec.Disks = append(nc.Spec.Disks, v1alpha1.Disk{Category: "local-ssd"})
+			}
+
+			p := &DefaultProvider{projectID: "my-project"}
+			disks, err := p.renderDiskProperties(amd64InstanceType(), nc, "us-central1-a")
+			require.NoError(t, err)
+			require.Equal(t, tc.wantScratchCount, countScratch(disks),
+				"expected %d SCRATCH local-SSD disks", tc.wantScratchCount)
+		})
+	}
 }
 
 func TestRenderDiskProperties_MultipleDisksSetProvisioningIndependently(t *testing.T) {
