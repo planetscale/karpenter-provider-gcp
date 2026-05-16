@@ -69,6 +69,11 @@ type TestCase struct {
 	// Defaults to ContainerOptimizedOS when empty.
 	ImageFamily         string
 	ConsolidationPolicy string // defaults to WhenEmptyOrUnderutilized when empty
+	// LocalSSDCount, when >0, attaches that many local-SSD (NVMe SCRATCH) disks
+	// in addition to the boot disk. Only valid on machine families that support
+	// local SSDs (n1, n2, n2d, c2, c2d, c3, c3d, m3, a2/a3/a4) and at counts
+	// the family allows (n2: 1, 2, 4, 8, 16, 24).
+	LocalSSDCount int
 }
 
 // UniqueSuffix returns a 6-character random hex string safe for use in k8s names.
@@ -107,6 +112,39 @@ func (e *Environment) CreateNodeClass(ctx context.Context, name, imageFamily str
 			"disks": []any{
 				map[string]any{"category": "pd-balanced", "sizeGiB": diskGiB, "boot": true},
 			},
+			"subnetRangeName": e.PodsRangeName,
+		},
+	}}
+	_, err := e.DynamicClient.Resource(gceNodeClassGVR).Create(ctx, obj, metav1.CreateOptions{})
+	Expect(err).NotTo(HaveOccurred(), "creating GCENodeClass %s", name)
+	e.trackNodeClass(name)
+}
+
+// CreateNodeClassWithLocalSSDs creates a GCENodeClass identical to
+// CreateNodeClass but with `count` additional local-SSD (NVMe SCRATCH) disks
+// attached. Caller must ensure the chosen instance family/type supports local
+// SSDs at the requested count.
+func (e *Environment) CreateNodeClassWithLocalSSDs(ctx context.Context, name, imageFamily string, count int) {
+	diskGiB := int64(DefaultE2EDiskGiB)
+	if imageFamily == gcpv1alpha1.ImageFamilyUbuntu {
+		diskGiB = 50
+	}
+	disks := []any{
+		map[string]any{"category": "pd-balanced", "sizeGiB": diskGiB, "boot": true},
+	}
+	for i := 0; i < count; i++ {
+		disks = append(disks, map[string]any{"category": "local-ssd"})
+	}
+	deleteIfExists(ctx, e.DynamicClient, gceNodeClassGVR, name)
+	obj := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "karpenter.k8s.gcp/v1alpha1",
+		"kind":       "GCENodeClass",
+		"metadata":   map[string]any{"name": name},
+		"spec": map[string]any{
+			"imageSelectorTerms": []any{
+				map[string]any{"alias": imageFamily + "@latest"},
+			},
+			"disks":           disks,
 			"subnetRangeName": e.PodsRangeName,
 		},
 	}}

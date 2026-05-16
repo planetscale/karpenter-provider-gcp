@@ -84,4 +84,13 @@ var _ = DescribeTable("Provisioning",
 		InstanceTypes: []string{"c4a-standard-2", "c4a-standard-4", "t2a-standard-2"},
 		ImageFamily:   gcpv1alpha1.ImageFamilyUbuntu,
 	}, SpecTimeout(15*time.Minute)),
+	// Local SSDs — verifies that `disks: [{category: local-ssd}, ...]` on the
+	// GCENodeClass results in NVMe SCRATCH disks attached to the GCE VM.
+	Entry("COS / amd64 / on-demand + 2 local SSDs", environment.TestCase{
+		CapacityType:  karpv1.CapacityTypeOnDemand,
+		Arch:          karpv1.ArchitectureAmd64,
+		Families:      []string{"n2"},
+		InstanceTypes: []string{"n2-standard-2"},
+		LocalSSDCount: 2,
+	}, SpecTimeout(15*time.Minute)),
 )

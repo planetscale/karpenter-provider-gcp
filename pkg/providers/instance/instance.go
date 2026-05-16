@@ -630,6 +630,21 @@ func (p *DefaultProvider) renderDiskProperties(instanceType *cloudprovider.Insta
 
 	attachedDisks := make([]*compute.AttachedDisk, len(disks))
 	for i, disk := range disks {
+		if disk.Category == "local-ssd" {
+			// Local SSDs are SCRATCH disks: GCE rejects PERSISTENT, partition size is
+			// family-defined (DiskSizeGb must be unset), and they don't take a
+			// SourceImage / DeviceName from the secondary-boot-disk path below.
+			attachedDisks[i] = &compute.AttachedDisk{
+				Type:       "SCRATCH",
+				AutoDelete: true,
+				Boot:       false,
+				Interface:  "NVME",
+				InitializeParams: &compute.AttachedDiskInitializeParams{
+					DiskType: fmt.Sprintf("projects/%s/zones/%s/diskTypes/local-ssd", p.projectID, zone),
+				},
+			}
+			continue
+		}
 		// Create a new disk configuration for each disk to avoid sharing references
 		initParams := &compute.AttachedDiskInitializeParams{
 			DiskType:   fmt.Sprintf("projects/%s/zones/%s/diskTypes/%s", p.projectID, zone, disk.Category),

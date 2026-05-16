@@ -60,7 +60,11 @@ func runProvisioningTest(ctx context.Context, tc environment.TestCase) {
 	if imageFamily == "" {
 		imageFamily = gcpv1alpha1.ImageFamilyContainerOptimizedOS
 	}
-	env.CreateNodeClass(ctx, name, imageFamily)
+	if tc.LocalSSDCount > 0 {
+		env.CreateNodeClassWithLocalSSDs(ctx, name, imageFamily, tc.LocalSSDCount)
+	} else {
+		env.CreateNodeClass(ctx, name, imageFamily)
+	}
 	env.WaitForNodeClassReady(ctx, name)
 	env.CreateNodePool(ctx, name, name, tc)
 	env.WaitForNodePoolReady(ctx, name)
@@ -83,6 +87,19 @@ func runProvisioningTest(ctx context.Context, tc environment.TestCase) {
 	Expect(node.Labels[corev1.LabelArchStable]).To(Equal(tc.Arch))
 	Expect(tc.Families).To(ContainElement(node.Labels[gcpv1alpha1.LabelInstanceFamily]))
 	Expect(tc.InstanceTypes).To(ContainElement(node.Labels[corev1.LabelInstanceTypeStable]))
+
+	if tc.LocalSSDCount > 0 {
+		inst, err := env.GetGCEInstance(ctx, node.Spec.ProviderID)
+		Expect(err).NotTo(HaveOccurred(), "fetching GCE instance for %s", node.Name)
+		var scratch int
+		for _, d := range inst.Disks {
+			if d.Type == "SCRATCH" && d.Interface == "NVME" {
+				scratch++
+			}
+		}
+		Expect(scratch).To(Equal(tc.LocalSSDCount),
+			"expected %d local SSDs on %s, got %d", tc.LocalSSDCount, node.Name, scratch)
+	}
 
 	env.WaitForKubeProxyRunning(ctx, provisionedNodeName)
 }
