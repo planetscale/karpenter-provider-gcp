@@ -149,7 +149,11 @@ func TestCalculateDiskConfiguration(t *testing.T) {
 			expectedSSDCount: 0,
 		},
 		{
-			name:      "c4d-highmem-8-lssd: API reports 1 partition but total override applies",
+			// Empirically verified: c4d-highmem-8-lssd ships 1 × 375 GiB SSD,
+			// matching the API's PartitionCount. The previous 2250 GiB override
+			// was empirically wrong; removing it lets the default per-partition
+			// math apply.
+			name:      "c4d-highmem-8-lssd: 1 partition x 375 GiB",
 			nodeClass: &v1alpha1.GCENodeClass{},
 			mt: &computepb.MachineType{
 				Name: aws.String("c4d-highmem-8-lssd"),
@@ -158,11 +162,11 @@ func TestCalculateDiskConfiguration(t *testing.T) {
 				},
 			},
 			expectedBootGiB:  100,
-			expectedSSDGiB:   2250,
+			expectedSSDGiB:   375,
 			expectedSSDCount: 1,
 		},
 		{
-			name:      "c4d-highmem-16-lssd: API reports 1 partition but total override applies",
+			name:      "c4d-highmem-16-lssd: 1 partition x 375 GiB",
 			nodeClass: &v1alpha1.GCENodeClass{},
 			mt: &computepb.MachineType{
 				Name: aws.String("c4d-highmem-16-lssd"),
@@ -171,8 +175,68 @@ func TestCalculateDiskConfiguration(t *testing.T) {
 				},
 			},
 			expectedBootGiB:  100,
-			expectedSSDGiB:   3000,
+			expectedSSDGiB:   375,
 			expectedSSDCount: 1,
+		},
+		{
+			// Top-level spec.localSsdCount on a non-bundled family must drive
+			// the SSD count, with size defaulting to the per-family partition
+			// size (375 GiB on n2d). Boot disk default applies because no
+			// boot entry is set.
+			name: "top-level LocalSsdCount=2 on n2d (no Disks)",
+			nodeClass: &v1alpha1.GCENodeClass{
+				Spec: v1alpha1.GCENodeClassSpec{
+					LocalSsdCount: 2,
+				},
+			},
+			mt: &computepb.MachineType{
+				Name: aws.String("n2d-standard-4"),
+			},
+			expectedBootGiB:  100,
+			expectedSSDGiB:   750,
+			expectedSSDCount: 2,
+		},
+		{
+			// Regression for early-return removal: an explicit boot disk
+			// entry alongside a bundled-SSD machine must surface BOTH the
+			// boot size AND the bundled SSDs.
+			name: "c4d-standard-8-lssd with custom 100 GiB boot disk",
+			nodeClass: &v1alpha1.GCENodeClass{
+				Spec: v1alpha1.GCENodeClassSpec{
+					Disks: []v1alpha1.Disk{
+						{Boot: true, SizeGiB: 100, Category: "hyperdisk-balanced"},
+					},
+				},
+			},
+			mt: &computepb.MachineType{
+				Name: aws.String("c4d-standard-8-lssd"),
+				BundledLocalSsds: &computepb.BundledLocalSsds{
+					PartitionCount: aws.Int32(1),
+				},
+			},
+			expectedBootGiB:  100,
+			expectedSSDGiB:   375,
+			expectedSSDCount: 1,
+		},
+		{
+			// Top-level LocalSsdCount wins over legacy disk entries to avoid
+			// double-counting when both are set.
+			name: "top-level LocalSsdCount=3 wins over 1 legacy disk entry",
+			nodeClass: &v1alpha1.GCENodeClass{
+				Spec: v1alpha1.GCENodeClassSpec{
+					LocalSsdCount: 3,
+					Disks: []v1alpha1.Disk{
+						{Boot: true, SizeGiB: 50, Category: "pd-balanced"},
+						{Category: "local-ssd"},
+					},
+				},
+			},
+			mt: &computepb.MachineType{
+				Name: aws.String("n2d-standard-4"),
+			},
+			expectedBootGiB:  50,
+			expectedSSDGiB:   3 * 375,
+			expectedSSDCount: 3,
 		},
 	}
 
@@ -182,6 +246,127 @@ func TestCalculateDiskConfiguration(t *testing.T) {
 			assert.Equal(t, tt.expectedBootGiB, bootGiB, "boot disk GiB mismatch")
 			assert.Equal(t, tt.expectedSSDGiB, ssdGiB, "total SSD GiB mismatch")
 			assert.Equal(t, tt.expectedSSDCount, ssdCount, "SSD count mismatch")
+		})
+	}
+}
+
+// TestNewInstanceTypeModeAware verifies that Capacity[ephemeral-storage] and
+// Overhead.KubeReserved[ephemeral-storage] are attributed correctly based on
+// (machine type, LocalSsdMode, LocalSsdCount).
+//
+// Why this matters: RawBlock SSDs are NOT mounted as ephemeral storage, so
+// they must not contribute to Capacity or to the SSD-mode (50/75/100 GiB)
+// kubeReserved reservation. Today the calculation conflates the two and
+// over-promises ephemeral capacity on default RawBlock -lssd nodes.
+func TestNewInstanceTypeModeAware(t *testing.T) {
+	const GiB = int64(1024) * 1024 * 1024
+
+	// boot-mode kubeReserved at 100 GiB default boot disk:
+	// min(50, round(35+6), 100) = 41 GiB.
+	const bootModeReservedGiB = int64(41)
+	const bootModeCapGiB = int64(100)
+
+	ctx := options.ToContext(context.Background(), &options.Options{VMMemoryOverheadPercent: 0.07})
+	offerings := cloudprovider.Offerings{{
+		Available: true,
+		Requirements: scheduling.NewRequirements(
+			scheduling.NewRequirement(corev1.LabelTopologyZone, corev1.NodeSelectorOpIn, "us-central1-a"),
+			scheduling.NewRequirement(karpv1.CapacityTypeLabelKey, corev1.NodeSelectorOpIn, karpv1.CapacityTypeOnDemand),
+		),
+	}}
+
+	cases := []struct {
+		name             string
+		mt               *computepb.MachineType
+		mode             v1alpha1.LocalSSDMode
+		count            int32
+		wantCapGiB       int64
+		wantReservedGiB  int64
+	}{
+		{
+			name:            "n2d-standard-4 no SSDs default (RawBlock)",
+			mt:              &computepb.MachineType{Name: aws.String("n2d-standard-4"), GuestCpus: aws.Int32(4), MemoryMb: aws.Int32(16384)},
+			mode:            "",
+			count:           0,
+			wantCapGiB:      bootModeCapGiB,
+			wantReservedGiB: bootModeReservedGiB,
+		},
+		{
+			name:            "n2d-standard-4 LocalSsdCount=2 RawBlock",
+			mt:              &computepb.MachineType{Name: aws.String("n2d-standard-4"), GuestCpus: aws.Int32(4), MemoryMb: aws.Int32(16384)},
+			mode:            v1alpha1.LocalSSDModeRawBlock,
+			count:           2,
+			wantCapGiB:      bootModeCapGiB,
+			wantReservedGiB: bootModeReservedGiB,
+		},
+		{
+			name:            "n2d-standard-4 LocalSsdCount=2 Ephemeral",
+			mt:              &computepb.MachineType{Name: aws.String("n2d-standard-4"), GuestCpus: aws.Int32(4), MemoryMb: aws.Int32(16384)},
+			mode:            v1alpha1.LocalSSDModeEphemeral,
+			count:           2,
+			wantCapGiB:      750,
+			wantReservedGiB: 75,
+		},
+		{
+			name: "c4d-standard-8-lssd default (RawBlock) — bundled SSD ignored for capacity",
+			mt: &computepb.MachineType{
+				Name: aws.String("c4d-standard-8-lssd"), GuestCpus: aws.Int32(8), MemoryMb: aws.Int32(32768),
+				BundledLocalSsds: &computepb.BundledLocalSsds{PartitionCount: aws.Int32(1)},
+			},
+			mode:            "",
+			count:           0,
+			wantCapGiB:      bootModeCapGiB,
+			wantReservedGiB: bootModeReservedGiB,
+		},
+		{
+			name: "c4d-standard-8-lssd Ephemeral",
+			mt: &computepb.MachineType{
+				Name: aws.String("c4d-standard-8-lssd"), GuestCpus: aws.Int32(8), MemoryMb: aws.Int32(32768),
+				BundledLocalSsds: &computepb.BundledLocalSsds{PartitionCount: aws.Int32(1)},
+			},
+			mode:            v1alpha1.LocalSSDModeEphemeral,
+			count:           0,
+			wantCapGiB:      375,
+			wantReservedGiB: 50,
+		},
+		{
+			name: "c4d-standard-96-lssd Ephemeral (8 partitions)",
+			mt: &computepb.MachineType{
+				Name: aws.String("c4d-standard-96-lssd"), GuestCpus: aws.Int32(96), MemoryMb: aws.Int32(393216),
+				BundledLocalSsds: &computepb.BundledLocalSsds{PartitionCount: aws.Int32(8)},
+			},
+			mode:            v1alpha1.LocalSSDModeEphemeral,
+			count:           0,
+			wantCapGiB:      3000,
+			wantReservedGiB: 100,
+		},
+		{
+			name: "z3-highmem-88 legacy SKU Ephemeral (12 partitions × 3000 GiB)",
+			mt: &computepb.MachineType{
+				Name: aws.String("z3-highmem-88"), GuestCpus: aws.Int32(88), MemoryMb: aws.Int32(720896),
+				BundledLocalSsds: &computepb.BundledLocalSsds{PartitionCount: aws.Int32(12)},
+			},
+			mode:            v1alpha1.LocalSSDModeEphemeral,
+			count:           0,
+			wantCapGiB:      36000,
+			wantReservedGiB: 100,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			nc := &v1alpha1.GCENodeClass{
+				Spec: v1alpha1.GCENodeClassSpec{
+					LocalSsdMode:  tc.mode,
+					LocalSsdCount: tc.count,
+				},
+			}
+			it := NewInstanceType(ctx, tc.mt, nc, "us-central1", offerings)
+			assert.NotNil(t, it, "InstanceType should be non-nil")
+			cap := it.Capacity[corev1.ResourceEphemeralStorage]
+			res := it.Overhead.KubeReserved[corev1.ResourceEphemeralStorage]
+			assert.Equal(t, tc.wantCapGiB*GiB, cap.Value(), "ephemeral-storage capacity")
+			assert.Equal(t, tc.wantReservedGiB*GiB, res.Value(), "ephemeral-storage kubeReserved")
 		})
 	}
 }
