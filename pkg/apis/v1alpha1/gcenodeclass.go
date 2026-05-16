@@ -94,7 +94,30 @@ type GCENodeClassSpec struct {
 	// Disabled by default to preserve backward compatibility.
 	// +optional
 	AutoGPUTaint bool `json:"autoGPUTaint,omitempty"`
+	// LocalSsdMode controls how local SSDs are exposed to workloads.
+	// Applies to local SSDs attached via LocalSsdCount AND to local SSDs
+	// bundled with the selected machine type (-lssd / -standardlssd / z3).
+	// Defaults to RawBlock.
+	// +kubebuilder:default=RawBlock
+	// +optional
+	LocalSsdMode LocalSSDMode `json:"localSsdMode,omitempty"`
+	// LocalSsdCount is the number of local SSDs to attach. Only honored on
+	// machine families that don't bundle local SSDs (n2, n2d, c2, m1, …).
+	// For bundled-SSD machine families (-lssd / -standardlssd / z3), leave
+	// unset — count is derived from the machine type via BundledLocalSsds.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	LocalSsdCount int32 `json:"localSsdCount,omitempty"`
 }
+
+// LocalSSDMode controls how local SSDs are exposed to workloads.
+// +kubebuilder:validation:Enum=RawBlock;Ephemeral
+type LocalSSDMode string
+
+const (
+	LocalSSDModeRawBlock  LocalSSDMode = "RawBlock"
+	LocalSSDModeEphemeral LocalSSDMode = "Ephemeral"
+)
 
 // NetworkConfig holds network settings for provisioned nodes.
 // The shape mirrors the Terraform google_container_node_pool network_config block
@@ -315,7 +338,7 @@ const (
 	// 1. A field changes its default value for an existing field that is already hashed
 	// 2. A field is added to the hash calculation with an already-set value
 	// 3. A field is removed from the hash calculations
-	GCENodeClassHashVersion = "v3"
+	GCENodeClassHashVersion = "v4"
 )
 
 func (in *GCENodeClass) Hash() string {

@@ -338,6 +338,26 @@ spec:
                   rule: self.all(k, k !='karpenter.sh/nodeclaim')
                 - message: tag contains a restricted tag matching karpenter.k8s.gcp/gcenodeclass
                   rule: self.all(k, k !='karpenter.k8s.gcp/gcenodeclass')
+              localSsdCount:
+                description: |-
+                  LocalSsdCount is the number of local SSDs to attach. Only honored on
+                  machine families that don't bundle local SSDs (n2, n2d, c2, m1, …).
+                  For bundled-SSD machine families (-lssd / -standardlssd / z3), leave
+                  unset — count is derived from the machine type via BundledLocalSsds.
+                format: int32
+                minimum: 0
+                type: integer
+              localSsdMode:
+                default: RawBlock
+                description: |-
+                  LocalSsdMode controls how local SSDs are exposed to workloads.
+                  Applies to local SSDs attached via LocalSsdCount AND to local SSDs
+                  bundled with the selected machine type (-lssd / -standardlssd / z3).
+                  Defaults to RawBlock.
+                enum:
+                - RawBlock
+                - Ephemeral
+                type: string
               metadata:
                 additionalProperties:
                   type: string
