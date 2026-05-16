@@ -78,6 +78,49 @@ func TestListEphemeralStorageCacheIsolation(t *testing.T) {
 		"each distinct disk config must produce a separate cache entry")
 }
 
+// TestListCacheKeyCoversLocalSSDFields verifies that two GCENodeClass objects
+// differing only in LocalSsdMode (or only in LocalSsdCount) get independent
+// InstanceType cache entries.
+//
+// Without this differentiation, switching a NodeClass from RawBlock to
+// Ephemeral (or changing LocalSsdCount) would silently inherit the previous
+// run's capacity/overhead from the cache for up to 30h.
+func TestListCacheKeyCoversLocalSSDFields(t *testing.T) {
+	ctx := options.ToContext(context.Background(), &options.Options{VMMemoryOverheadPercent: 0.07})
+
+	t.Run("differing LocalSsdMode produces independent cache entries", func(t *testing.T) {
+		p := newTestProvider()
+		raw := &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{
+			LocalSsdMode: v1alpha1.LocalSSDModeRawBlock, LocalSsdCount: 1,
+		}}
+		eph := &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{
+			LocalSsdMode: v1alpha1.LocalSSDModeEphemeral, LocalSsdCount: 1,
+		}}
+
+		_, err := p.List(ctx, raw)
+		assert.NoError(t, err)
+		_, err = p.List(ctx, eph)
+		assert.NoError(t, err)
+
+		assert.Equal(t, 2, p.instanceTypesCache.ItemCount(),
+			"different LocalSsdMode must produce different cache entries")
+	})
+
+	t.Run("differing LocalSsdCount produces independent cache entries", func(t *testing.T) {
+		p := newTestProvider()
+		nc1 := &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 1}}
+		nc2 := &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 2}}
+
+		_, err := p.List(ctx, nc1)
+		assert.NoError(t, err)
+		_, err = p.List(ctx, nc2)
+		assert.NoError(t, err)
+
+		assert.Equal(t, 2, p.instanceTypesCache.ItemCount(),
+			"different LocalSsdCount must produce different cache entries")
+	})
+}
+
 func TestCalculateDiskConfiguration(t *testing.T) {
 	tests := []struct {
 		name             string
