@@ -43,10 +43,20 @@ func NewInstanceType(ctx context.Context, mt *computepb.MachineType, nodeClass *
 		return nil
 	}
 
-	// Calculate disk configuration from GCENodeClass
 	bootDiskGiB, totalSSDGiB, localSSDCount := calculateDiskConfigGiB(nodeClass, mt)
-	totalStorageGiB := totalSSDGiB
-	if totalSSDGiB == 0 {
+
+	// Only Ephemeral mode mounts local SSDs as the kubelet's ephemeral-storage
+	// filesystem; RawBlock leaves them as raw NVMe devices for the workload and
+	// ephemeral storage falls back to the boot disk. Zero out the SSD inputs so
+	// ResolveReservedResource uses its boot-disk branch (option1/option2/100 GiB
+	// minimum) instead of the SSD-mode (50/75/100 GiB by count) branch.
+	effectiveSSDGiB, effectiveSSDCount := totalSSDGiB, localSSDCount
+	if nodeClass == nil || nodeClass.Spec.LocalSsdMode != v1alpha1.LocalSSDModeEphemeral {
+		effectiveSSDGiB, effectiveSSDCount = 0, 0
+	}
+
+	totalStorageGiB := effectiveSSDGiB
+	if totalStorageGiB == 0 {
 		totalStorageGiB = bootDiskGiB
 	}
 	totalStorageBytes := totalStorageGiB * 1024 * 1024 * 1024
@@ -56,8 +66,8 @@ func NewInstanceType(ctx context.Context, mt *computepb.MachineType, nodeClass *
 		int64(mt.GetGuestCpus()*1000),
 		int64(mt.GetMemoryMb()),
 		bootDiskGiB,
-		totalSSDGiB,
-		localSSDCount,
+		effectiveSSDGiB,
+		effectiveSSDCount,
 	)
 
 	log.FromContext(ctx).V(1).Info("calculated ephemeral storage reservations",
@@ -65,6 +75,8 @@ func NewInstanceType(ctx context.Context, mt *computepb.MachineType, nodeClass *
 		"bootDiskGiB", bootDiskGiB,
 		"totalSSDGiB", totalSSDGiB,
 		"localSSDCount", localSSDCount,
+		"effectiveSSDGiB", effectiveSSDGiB,
+		"effectiveSSDCount", effectiveSSDCount,
 		"ephemeralEviction", ephemeralEviction,
 		"ephemeralSystem", ephemeralSystem)
 
@@ -218,30 +230,47 @@ func memory(ctx context.Context, mt *computepb.MachineType) *resource.Quantity {
 	return resource.NewQuantity(totalQuantity-int64(float64(totalQuantity)*osReservedPercent), resource.DecimalSI)
 }
 
+// calculateDiskConfigGiB returns the boot disk size, total local-SSD GiB, and
+// local-SSD count that will be attached to the instance.
+//
+// Local-SSD count precedence (count → total GiB is computed via
+// localssd.TotalGiB):
+//
+//  1. spec.localSsdCount (top-level) on flex families like n2d. Wins over
+//     legacy disks[] entries; bundled-SSD families are already filtered out
+//     by the tryCreateInstance conflict check in pkg/providers/instance.
+//  2. disks[].category=local-ssd entries (deprecated legacy shape).
+//  3. machineType.bundledLocalSsds.partitionCount.
+//
+// Boot disk: explicit disks[].boot=true entry if present, else 100 GiB default.
 func calculateDiskConfigGiB(nodeClass *v1alpha1.GCENodeClass, mt *computepb.MachineType) (int64, int64, int64) {
-	bootDiskGiB := int64(100) // Default boot disk size
-	totalSSDGiB := int64(0)
-	localSSDCount := int64(0)
+	bootDiskGiB := int64(100)
+	var ssdCount int64
 
-	if nodeClass != nil && len(nodeClass.Spec.Disks) > 0 {
-		// Use disk configuration from GCENodeClass
+	if nodeClass != nil {
 		for _, disk := range nodeClass.Spec.Disks {
-			if disk.Boot {
-				// Boot disk size from nodeClass
+			if disk.Boot && disk.SizeGiB > 0 {
 				bootDiskGiB = int64(disk.SizeGiB)
-			} else if disk.Category == "local-ssd" {
-				// Local SSD from nodeClass
-				totalSSDGiB += int64(disk.SizeGiB)
-				localSSDCount++
+				break
 			}
 		}
-		return bootDiskGiB, totalSSDGiB, localSSDCount
+		if nodeClass.Spec.LocalSsdCount > 0 {
+			ssdCount = int64(nodeClass.Spec.LocalSsdCount)
+		} else {
+			for _, disk := range nodeClass.Spec.Disks {
+				if disk.Category == "local-ssd" {
+					ssdCount++
+				}
+			}
+		}
 	}
 
-	// Fallback to machine type bundled local SSDs if no nodeClass disk config
-	if bls := mt.GetBundledLocalSsds(); bls != nil && bls.PartitionCount != nil && *bls.PartitionCount > 0 {
-		localSSDCount = int64(*bls.PartitionCount)
-		totalSSDGiB = localssd.TotalGiB(aws.StringValue(mt.Name), int(*bls.PartitionCount))
+	if ssdCount == 0 {
+		if bls := mt.GetBundledLocalSsds(); bls != nil && bls.PartitionCount != nil && *bls.PartitionCount > 0 {
+			ssdCount = int64(*bls.PartitionCount)
+		}
 	}
-	return bootDiskGiB, totalSSDGiB, localSSDCount
+
+	totalSSDGiB := localssd.TotalGiB(aws.StringValue(mt.Name), int(ssdCount))
+	return bootDiskGiB, totalSSDGiB, ssdCount
 }
