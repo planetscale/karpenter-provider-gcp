@@ -67,6 +67,10 @@ type Provider interface {
 	List(context.Context, *v1alpha1.GCENodeClass) ([]*cloudprovider.InstanceType, error)
 	UpdateInstanceTypes(ctx context.Context) error
 	UpdateInstanceTypeOfferings(ctx context.Context) error
+	// GetMachineType returns the cached GCE MachineType for name, or nil if
+	// not yet populated / not found. Callers must treat nil as "unknown" and
+	// fall back to other sources (e.g. nodeClass-declared SSD count).
+	GetMachineType(name string) *computepb.MachineType
 }
 
 type DefaultProvider struct {
@@ -111,6 +115,17 @@ func NewDefaultProvider(ctx context.Context, authOptions *auth.Credential, prici
 
 func (p *DefaultProvider) LivenessProbe(req *http.Request) error {
 	return p.pricingProvider.LivenessProbe(req)
+}
+
+func (p *DefaultProvider) GetMachineType(name string) *computepb.MachineType {
+	p.muInstanceTypesInfo.RLock()
+	defer p.muInstanceTypesInfo.RUnlock()
+	for _, mt := range p.instanceTypesInfo {
+		if aws.StringValue(mt.Name) == name {
+			return mt
+		}
+	}
+	return nil
 }
 
 func (p *DefaultProvider) validateState() error {

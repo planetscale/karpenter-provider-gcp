@@ -44,6 +44,7 @@ import (
 	pkgcache "github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/cache"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/gke"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/imagefamily"
+	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/instancetype"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/metadata"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/nodepooltemplate"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/utils"
@@ -77,6 +78,7 @@ type Provider interface {
 
 type DefaultProvider struct {
 	gkeProvider          gke.Provider
+	instanceTypeProvider instancetype.Provider
 	unavailableOfferings *pkgcache.UnavailableOfferings
 
 	// In current implementation, instanceID == InstanceName
@@ -92,10 +94,11 @@ type DefaultProvider struct {
 }
 
 func NewProvider(clusterName, clusterLocation, region, projectID, defaultServiceAccount, computeDefaultSA string, computeService *compute.Service, gkeProvider gke.Provider,
-	unavailableOfferings *pkgcache.UnavailableOfferings,
+	instanceTypeProvider instancetype.Provider, unavailableOfferings *pkgcache.UnavailableOfferings,
 ) Provider {
 	return &DefaultProvider{
 		gkeProvider:           gkeProvider,
+		instanceTypeProvider:  instanceTypeProvider,
 		unavailableOfferings:  unavailableOfferings,
 		instanceCache:         cache.New(instanceCacheExpiration, instanceCacheExpiration),
 		clusterName:           clusterName,
@@ -909,9 +912,47 @@ func (p *DefaultProvider) setupInstanceMetadata(instanceMetadata *compute.Metada
 	metadata.AppendNodeClaimLabel(nodeClaim, nodeClass, instanceMetadata)
 	metadata.AppendRegisteredLabel(instanceMetadata)
 	metadata.AppendSecondaryBootDisks(p.projectID, nodeClass, instanceMetadata)
+
+	if ssdCount := p.resolveLocalSSDCount(nodeClass, instanceType.Name); ssdCount > 0 {
+		instanceMetadata.Items = metadata.PatchLocalSSDMetadata(
+			instanceMetadata.Items,
+			nodeClass.Spec.LocalSsdMode,
+			ssdCount,
+		)
+	}
+
 	metadata.ApplyCustomMetadata(instanceMetadata, nodeClass.Spec.Metadata)
 
 	return nil
+}
+
+// resolveLocalSSDCount returns the effective local-SSD count to advertise to
+// the GKE bootstrapper via kube-env. Precedence (mirroring calculateDiskConfigGiB):
+//
+//  1. machineType.BundledLocalSsds.PartitionCount (bundled families -lssd,
+//     -standardlssd, -highlssd, -lssd-metal, -highlssd-metal).
+//  2. spec.localSsdCount (flex families like n2d).
+//  3. legacy disks[].category=local-ssd entries.
+//
+// Returns 0 if none apply (helper short-circuits to no-op).
+func (p *DefaultProvider) resolveLocalSSDCount(nodeClass *v1alpha1.GCENodeClass, instanceTypeName string) int {
+	if p.instanceTypeProvider != nil {
+		if mt := p.instanceTypeProvider.GetMachineType(instanceTypeName); mt != nil {
+			if bls := mt.GetBundledLocalSsds(); bls != nil && bls.PartitionCount != nil && *bls.PartitionCount > 0 {
+				return int(*bls.PartitionCount)
+			}
+		}
+	}
+	if nodeClass.Spec.LocalSsdCount > 0 {
+		return int(nodeClass.Spec.LocalSsdCount)
+	}
+	legacy := 0
+	for _, d := range nodeClass.Spec.Disks {
+		if d.Category == "local-ssd" {
+			legacy++
+		}
+	}
+	return legacy
 }
 
 // setupGPUMetadata injects the nvidia.com/gpu=present:NoSchedule taint into KUBELET_ARGS

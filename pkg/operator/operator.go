@@ -143,6 +143,7 @@ func NewOperator(ctx context.Context, operator *operator.Operator) (context.Cont
 		computeDefaultSA = proj.DefaultServiceAccount
 	}
 
+	instanceTypeProvider := instancetype.NewDefaultProvider(ctx, &auth, pricingProvider, gkeProvider, unavailableOfferingsCache)
 	instanceProvider := instance.NewProvider(
 		options.FromContext(ctx).ClusterName,
 		options.FromContext(ctx).ClusterLocation,
@@ -152,9 +153,9 @@ func NewOperator(ctx context.Context, operator *operator.Operator) (context.Cont
 		computeDefaultSA,
 		computeService,
 		gkeProvider,
+		instanceTypeProvider,
 		unavailableOfferingsCache,
 	)
-	instanceTypeProvider := instancetype.NewDefaultProvider(ctx, &auth, pricingProvider, gkeProvider, unavailableOfferingsCache)
 
 	return ctx, &Operator{
 		Operator:                  operator,
