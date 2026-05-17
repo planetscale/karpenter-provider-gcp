@@ -628,21 +628,16 @@ func (p *DefaultProvider) renderDiskProperties(instanceType *cloudprovider.Insta
 		return disks[i].Boot
 	})
 
-	attachedDisks := make([]*compute.AttachedDisk, len(disks))
-	for i, disk := range disks {
+	useTopLevelSSD := nodeClass.Spec.LocalSsdCount > 0
+	attachedDisks := make([]*compute.AttachedDisk, 0, len(disks)+int(nodeClass.Spec.LocalSsdCount))
+	for _, disk := range disks {
 		if disk.Category == "local-ssd" {
-			// Local SSDs are SCRATCH disks: GCE rejects PERSISTENT, partition size is
-			// family-defined (DiskSizeGb must be unset), and they don't take a
-			// SourceImage / DeviceName from the secondary-boot-disk path below.
-			attachedDisks[i] = &compute.AttachedDisk{
-				Type:       "SCRATCH",
-				AutoDelete: true,
-				Boot:       false,
-				Interface:  "NVME",
-				InitializeParams: &compute.AttachedDiskInitializeParams{
-					DiskType: fmt.Sprintf("projects/%s/zones/%s/diskTypes/local-ssd", p.projectID, zone),
-				},
+			if useTopLevelSSD {
+				// Top-level LocalSsdCount wins; ignore legacy local-ssd disk entries
+				// so they aren't double-counted.
+				continue
 			}
+			attachedDisks = append(attachedDisks, p.scratchDisk(zone))
 			continue
 		}
 		// Create a new disk configuration for each disk to avoid sharing references
@@ -689,10 +684,29 @@ func (p *DefaultProvider) renderDiskProperties(instanceType *cloudprovider.Insta
 			}
 		}
 
-		attachedDisks[i] = attachedDisk
+		attachedDisks = append(attachedDisks, attachedDisk)
+	}
+
+	for i := int32(0); i < nodeClass.Spec.LocalSsdCount; i++ {
+		attachedDisks = append(attachedDisks, p.scratchDisk(zone))
 	}
 
 	return attachedDisks, nil
+}
+
+// scratchDisk builds a local-SSD SCRATCH AttachedDisk. GCE rejects PERSISTENT
+// for local-ssd, the partition size is family-defined (DiskSizeGb must be
+// unset), and these disks don't take a SourceImage / DeviceName.
+func (p *DefaultProvider) scratchDisk(zone string) *compute.AttachedDisk {
+	return &compute.AttachedDisk{
+		Type:       "SCRATCH",
+		AutoDelete: true,
+		Boot:       false,
+		Interface:  "NVME",
+		InitializeParams: &compute.AttachedDiskInitializeParams{
+			DiskType: fmt.Sprintf("projects/%s/zones/%s/diskTypes/local-ssd", p.projectID, zone),
+		},
+	}
 }
 
 func (p *DefaultProvider) buildInstance(nodeClaim *karpv1.NodeClaim, nodeClass *v1alpha1.GCENodeClass, instanceType *cloudprovider.InstanceType, template *compute.InstanceTemplate, clusterConfig *container.Cluster, nodePoolName, zone, instanceName, capacityType string) (*compute.Instance, error) {
