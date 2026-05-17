@@ -242,6 +242,13 @@ func memory(ctx context.Context, mt *computepb.MachineType) *resource.Quantity {
 //  2. disks[].category=local-ssd entries (deprecated legacy shape).
 //  3. machineType.bundledLocalSsds.partitionCount.
 //
+// Note: this precedence is intentionally inverted relative to
+// instance.resolveLocalSSDCount, which writes kube-env after the conflict
+// check has already run and therefore treats BundledLocalSsds as
+// authoritative. The two functions only diverge when a bundled SKU escapes
+// the conflict check (a known gap for accelerator families that lack an
+// -lssd-family suffix); see resolveLocalSSDCount for details.
+//
 // Boot disk: explicit disks[].boot=true entry if present, else 100 GiB default.
 func calculateDiskConfigGiB(nodeClass *v1alpha1.GCENodeClass, mt *computepb.MachineType) (int64, int64, int64) {
 	bootDiskGiB := int64(100)

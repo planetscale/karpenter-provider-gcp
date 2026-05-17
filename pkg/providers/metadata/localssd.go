@@ -49,9 +49,12 @@ const (
 //
 // Stale entries for the opposite mode are removed so a mode flip on an
 // existing kube-env produces the expected single-mode state.
-func PatchLocalSSDMetadata(items []*compute.MetadataItems, mode v1alpha1.LocalSSDMode, count int) []*compute.MetadataItems {
+//
+// Returns an error if either kube-env or kube-labels is absent from items
+// while count > 0, consistent with AppendGPUTaint and PatchKubeEnvForInstanceType.
+func PatchLocalSSDMetadata(items []*compute.MetadataItems, mode v1alpha1.LocalSSDMode, count int) ([]*compute.MetadataItems, error) {
 	if count <= 0 {
-		return items
+		return items, nil
 	}
 
 	var (
@@ -71,15 +74,24 @@ func PatchLocalSSDMetadata(items []*compute.MetadataItems, mode v1alpha1.LocalSS
 		labelKeep, labelDrop = kubeLabelKeyLocalNVMe, kubeLabelKeyEphemeralLS
 	}
 
+	var sawEnv, sawLabels bool
 	for _, it := range items {
 		switch it.Key {
 		case "kube-env":
+			sawEnv = true
 			it.Value = lo.ToPtr(upsertKubeEnvLine(lo.FromPtr(it.Value), envKeep, envDrop, envLine))
 		case "kube-labels":
+			sawLabels = true
 			it.Value = lo.ToPtr(upsertKubeLabel(lo.FromPtr(it.Value), labelKeep, labelDrop))
 		}
 	}
-	return items
+	if !sawEnv {
+		return items, fmt.Errorf("kube-env metadata item not found")
+	}
+	if !sawLabels {
+		return items, fmt.Errorf("kube-labels metadata item not found")
+	}
+	return items, nil
 }
 
 // upsertKubeEnvLine drops any line starting with "<dropKey>:" and replaces
@@ -87,7 +99,10 @@ func PatchLocalSSDMetadata(items []*compute.MetadataItems, mode v1alpha1.LocalSS
 func upsertKubeEnvLine(kubeEnv, keepKey, dropKey, newLine string) string {
 	keepPrefix := keepKey + ":"
 	dropPrefix := dropKey + ":"
-	lines := strings.Split(kubeEnv, "\n")
+	// Canonical kube-env ends with "\n"; strip it before Split so the trailing
+	// empty element doesn't slot in front of an appended newLine.
+	trimmed := strings.TrimRight(kubeEnv, "\n")
+	lines := strings.Split(trimmed, "\n")
 	out := make([]string, 0, len(lines)+1)
 	replaced := false
 	for _, line := range lines {
@@ -107,7 +122,11 @@ func upsertKubeEnvLine(kubeEnv, keepKey, dropKey, newLine string) string {
 	if !replaced {
 		out = append(out, newLine)
 	}
-	return strings.Join(out, "\n")
+	result := strings.Join(out, "\n")
+	if strings.HasSuffix(kubeEnv, "\n") {
+		result += "\n"
+	}
+	return result
 }
 
 // upsertKubeLabel removes any "<dropKey>=..." pair from a comma-separated

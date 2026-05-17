@@ -27,7 +27,9 @@ import (
 	"testing"
 	"time"
 
+	"cloud.google.com/go/compute/apiv1/computepb"
 	"github.com/patrickmn/go-cache"
+	"github.com/samber/lo"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/api/compute/v1"
 	containerv1 "google.golang.org/api/container/v1"
@@ -1611,37 +1613,55 @@ func TestOnHostMaintenancePolicy(t *testing.T) {
 		}
 		return &cloudprovider.InstanceType{Name: name, Requirements: scheduling.NewRequirements(gpuReq)}
 	}
+	mtWithBundled := func(count int32) *computepb.MachineType {
+		return &computepb.MachineType{
+			BundledLocalSsds: &computepb.BundledLocalSsds{PartitionCount: lo.ToPtr(count)},
+		}
+	}
 
 	cases := []struct {
 		name         string
 		instanceType *cloudprovider.InstanceType
 		capacityType string
+		mt           *computepb.MachineType
 		want         string
 	}{
-		{"z3 non-metal lssd on-demand requires MIGRATE",
-			newIT("z3-highmem-22-standardlssd", false), karpv1.CapacityTypeOnDemand, "MIGRATE"},
+		{"z3 non-metal lssd ≤18 TiB on-demand requires MIGRATE",
+			newIT("z3-highmem-22-standardlssd", false), karpv1.CapacityTypeOnDemand, mtWithBundled(2), "MIGRATE"},
 		{"z3 non-metal lssd spot keeps TERMINATE (spot wins)",
-			newIT("z3-highmem-22-standardlssd", false), karpv1.CapacityTypeSpot, "TERMINATE"},
-		{"z3 highlssd-metal on-demand falls through (bare metal must not MIGRATE)",
-			newIT("z3-highmem-192-highlssd-metal", false), karpv1.CapacityTypeOnDemand, ""},
-		{"c4 lssd-metal on-demand falls through (bare metal)",
-			newIT("c4-standard-288-lssd-metal", false), karpv1.CapacityTypeOnDemand, ""},
+			newIT("z3-highmem-22-standardlssd", false), karpv1.CapacityTypeSpot, mtWithBundled(2), "TERMINATE"},
+		{"z3-highmem-88-highlssd 12 partitions = 35 TiB requires TERMINATE",
+			newIT("z3-highmem-88-highlssd", false), karpv1.CapacityTypeOnDemand, mtWithBundled(12), "TERMINATE"},
+		{"z3-highmem-176-standardlssd 12 partitions = 35 TiB requires TERMINATE",
+			newIT("z3-highmem-176-standardlssd", false), karpv1.CapacityTypeOnDemand, mtWithBundled(12), "TERMINATE"},
+		{"z3 non-metal 6 partitions = 17.58 TiB stays MIGRATE (under 18 TiB)",
+			newIT("z3-highmem-88-standardlssd", false), karpv1.CapacityTypeOnDemand, mtWithBundled(6), "MIGRATE"},
+		{"z3 non-metal cache miss (mt nil) falls back to MIGRATE",
+			newIT("z3-highmem-88-highlssd", false), karpv1.CapacityTypeOnDemand, nil, "MIGRATE"},
+		{"z3 highlssd-metal on-demand: bare metal explicit TERMINATE",
+			newIT("z3-highmem-192-highlssd-metal", false), karpv1.CapacityTypeOnDemand, mtWithBundled(12), "TERMINATE"},
+		{"c4 lssd-metal on-demand: bare metal explicit TERMINATE",
+			newIT("c4-standard-288-lssd-metal", false), karpv1.CapacityTypeOnDemand, mtWithBundled(6), "TERMINATE"},
+		{"h4d-highmem-192-lssd on-demand: HPC, no live migration → TERMINATE",
+			newIT("h4d-highmem-192-lssd", false), karpv1.CapacityTypeOnDemand, mtWithBundled(10), "TERMINATE"},
+		{"h4d-standard-192 (no -lssd) on-demand: HPC, no live migration → TERMINATE",
+			newIT("h4d-standard-192", false), karpv1.CapacityTypeOnDemand, nil, "TERMINATE"},
 		{"GPU on-demand returns TERMINATE",
-			newIT("a2-highgpu-1g", true), karpv1.CapacityTypeOnDemand, "TERMINATE"},
+			newIT("a2-highgpu-1g", true), karpv1.CapacityTypeOnDemand, nil, "TERMINATE"},
 		{"n2d on-demand falls through",
-			newIT("n2d-standard-4", false), karpv1.CapacityTypeOnDemand, ""},
+			newIT("n2d-standard-4", false), karpv1.CapacityTypeOnDemand, nil, ""},
 		{"n2d spot returns TERMINATE",
-			newIT("n2d-standard-4", false), karpv1.CapacityTypeSpot, "TERMINATE"},
+			newIT("n2d-standard-4", false), karpv1.CapacityTypeSpot, nil, "TERMINATE"},
 		{"c4d-lssd on-demand falls through (GCE accepts MIGRATE or TERMINATE)",
-			newIT("c4d-standard-8-lssd", false), karpv1.CapacityTypeOnDemand, ""},
+			newIT("c4d-standard-8-lssd", false), karpv1.CapacityTypeOnDemand, mtWithBundled(2), ""},
 		{"c4a-lssd on-demand falls through (GCE accepts MIGRATE or TERMINATE)",
-			newIT("c4a-standard-8-lssd", false), karpv1.CapacityTypeOnDemand, ""},
+			newIT("c4a-standard-8-lssd", false), karpv1.CapacityTypeOnDemand, mtWithBundled(2), ""},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, tc.want, onHostMaintenancePolicy(tc.instanceType, tc.capacityType))
+			require.Equal(t, tc.want, onHostMaintenancePolicy(tc.instanceType, tc.capacityType, tc.mt))
 		})
 	}
 }

@@ -111,7 +111,7 @@ func runProvisioningTest(ctx context.Context, tc environment.TestCase) {
 		// GKE-applied SSD labels (`cloud.google.com/gke-local-nvme-ssd`,
 		// `cloud.google.com/gke-ephemeral-storage-local-ssd`) are written by
 		// the bootstrapper and can land after the workload pod reaches Running,
-		// so poll instead of relying on the snapshot taken at line 80.
+		// so poll instead of asserting against the node snapshot fetched above.
 		labelKey := "cloud.google.com/gke-local-nvme-ssd"
 		if tc.LocalSSDMode == gcpv1alpha1.LocalSSDModeEphemeral {
 			labelKey = "cloud.google.com/gke-ephemeral-storage-local-ssd"

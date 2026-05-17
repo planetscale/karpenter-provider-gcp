@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"cloud.google.com/go/compute/apiv1/computepb"
 	"github.com/patrickmn/go-cache"
 	"github.com/samber/lo"
 	"google.golang.org/api/compute/v1"
@@ -48,6 +49,7 @@ import (
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/metadata"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/nodepooltemplate"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/utils"
+	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/utils/localssd"
 )
 
 const (
@@ -362,7 +364,11 @@ func (e *retryableError) Error() string {
 }
 
 func (p *DefaultProvider) tryCreateInstance(ctx context.Context, nodeClass *v1alpha1.GCENodeClass, nodeClaim *karpv1.NodeClaim, instanceType *cloudprovider.InstanceType, capacityType string) (*compute.Instance, string, *compute.InstanceTemplate, error) {
-	if err := evaluateLocalSSDConflict(nodeClass, instanceType.Name); err != nil {
+	var mt *computepb.MachineType
+	if p.instanceTypeProvider != nil {
+		mt = p.instanceTypeProvider.GetMachineType(instanceType.Name)
+	}
+	if err := evaluateLocalSSDConflict(nodeClass, instanceType.Name, mt); err != nil {
 		return nil, "", nil, &retryableError{err}
 	}
 
@@ -770,7 +776,11 @@ func (p *DefaultProvider) buildInstance(nodeClaim *karpv1.NodeClaim, nodeClass *
 	// Configure capacity provision
 	p.configureInstanceCapacityProvision(instance, capacityType)
 
-	if policy := onHostMaintenancePolicy(instanceType, capacityType); policy != "" {
+	var mt *computepb.MachineType
+	if p.instanceTypeProvider != nil {
+		mt = p.instanceTypeProvider.GetMachineType(instanceType.Name)
+	}
+	if policy := onHostMaintenancePolicy(instanceType, capacityType, mt); policy != "" {
 		instance.Scheduling.OnHostMaintenance = policy
 	}
 
@@ -914,12 +924,20 @@ func (p *DefaultProvider) setupInstanceMetadata(instanceMetadata *compute.Metada
 	metadata.AppendRegisteredLabel(instanceMetadata)
 	metadata.AppendSecondaryBootDisks(p.projectID, nodeClass, instanceMetadata)
 
-	if ssdCount := p.resolveLocalSSDCount(nodeClass, instanceType.Name); ssdCount > 0 {
-		instanceMetadata.Items = metadata.PatchLocalSSDMetadata(
+	ssdCount, err := p.resolveLocalSSDCount(nodeClass, instanceType.Name)
+	if err != nil {
+		return fmt.Errorf("failed to resolve local SSD count: %w", err)
+	}
+	if ssdCount > 0 {
+		patched, err := metadata.PatchLocalSSDMetadata(
 			instanceMetadata.Items,
 			nodeClass.Spec.LocalSsdMode,
 			ssdCount,
 		)
+		if err != nil {
+			return fmt.Errorf("failed to patch local SSD metadata: %w", err)
+		}
+		instanceMetadata.Items = patched
 	}
 
 	metadata.ApplyCustomMetadata(instanceMetadata, nodeClass.Spec.Metadata)
@@ -928,24 +946,38 @@ func (p *DefaultProvider) setupInstanceMetadata(instanceMetadata *compute.Metada
 }
 
 // resolveLocalSSDCount returns the effective local-SSD count to advertise to
-// the GKE bootstrapper via kube-env. Precedence (mirroring calculateDiskConfigGiB):
+// the GKE bootstrapper via kube-env. Precedence:
 //
 //  1. machineType.BundledLocalSsds.PartitionCount (bundled families -lssd,
-//     -standardlssd, -highlssd, -lssd-metal, -highlssd-metal).
+//     -standardlssd, -highlssd, -lssd-metal, -highlssd-metal). The bundled
+//     count is authoritative — user config is rejected upstream by
+//     evaluateLocalSSDConflict for these families.
 //  2. spec.localSsdCount (flex families like n2d).
 //  3. legacy disks[].category=local-ssd entries.
 //
-// Returns 0 if none apply (helper short-circuits to no-op).
-func (p *DefaultProvider) resolveLocalSSDCount(nodeClass *v1alpha1.GCENodeClass, instanceTypeName string) int {
+// Note: this precedence is intentionally inverted relative to
+// instancetype.calculateDiskConfigGiB, which runs before the conflict check
+// fires and therefore must prefer user config over the API. The two only
+// diverge when a bundled SKU escapes the conflict check (a known gap for
+// accelerator families that lack an -lssd-family suffix).
+//
+// Returns 0 if none apply (helper short-circuits to no-op). Returns an error
+// when the suffix says the SKU bundles local SSDs but the instance-type cache
+// has no entry — we cannot know the count, and silently proceeding would boot
+// a node whose physical SSDs are never formatted/labelled by the bootstrapper.
+func (p *DefaultProvider) resolveLocalSSDCount(nodeClass *v1alpha1.GCENodeClass, instanceTypeName string) (int, error) {
 	if p.instanceTypeProvider != nil {
-		if mt := p.instanceTypeProvider.GetMachineType(instanceTypeName); mt != nil {
+		mt := p.instanceTypeProvider.GetMachineType(instanceTypeName)
+		if mt != nil {
 			if bls := mt.GetBundledLocalSsds(); bls != nil && bls.PartitionCount != nil && *bls.PartitionCount > 0 {
-				return int(*bls.PartitionCount)
+				return int(*bls.PartitionCount), nil
 			}
+		} else if hasBundledLocalSSDs(instanceTypeName, nil) {
+			return 0, fmt.Errorf("machine type %s bundles local SSDs but is not in the instance-type cache; refusing to create without an authoritative SSD count", instanceTypeName)
 		}
 	}
 	if nodeClass.Spec.LocalSsdCount > 0 {
-		return int(nodeClass.Spec.LocalSsdCount)
+		return int(nodeClass.Spec.LocalSsdCount), nil
 	}
 	legacy := 0
 	for _, d := range nodeClass.Spec.Disks {
@@ -953,7 +985,7 @@ func (p *DefaultProvider) resolveLocalSSDCount(nodeClass *v1alpha1.GCENodeClass,
 			legacy++
 		}
 	}
-	return legacy
+	return legacy, nil
 }
 
 // warnLegacyLocalSSDDisks logs a deprecation warning for each
@@ -1049,18 +1081,40 @@ func (p *DefaultProvider) configureInstanceCapacityProvision(instance *compute.I
 	}
 }
 
+// z3HighSsdTiBThreshold is the bundled-local-SSD capacity above which a z3
+// non-metal SKU must use TERMINATE per GCE rules. Per GCP docs
+// (https://cloud.google.com/compute/docs/instances/setting-vm-host-options),
+// TERMINATE is the only supported maintenance policy for z3 instances with
+// more than 18 TiB of attached Titanium SSD. Below the threshold, z3
+// non-metal requires MIGRATE.
+const z3HighSsdTiBThreshold = 18
+
 // onHostMaintenancePolicy returns the GCE Scheduling.OnHostMaintenance value
-// required by the (instanceType, capacityType) pair, or "" to leave the GCE
-// default (MIGRATE for non-spot, TERMINATE for spot). Ordering matters:
-// spot wins over GPU wins over z3. If z3 ever ships a GPU SKU, GPU's
-// TERMINATE would override z3's MIGRATE and GCE would reject the create —
-// today's catalogue has no such SKU.
+// required by the (instanceType, capacityType, machineType) tuple, or "" to
+// leave the GCE default (MIGRATE for non-spot non-metal).
+// Precedence: spot → GPU → z3-non-metal >18 TiB → z3-non-metal → bare-metal → h4d → default.
 //
-// Spot + z3-non-metal-lssd is intentionally not reconciled here: spot
-// requires TERMINATE, z3 non-metal lssd requires MIGRATE, and GCE rejects
-// both combinations. We prefer spot's TERMINATE so the failure mode is the
-// user's explicit spot request, not a silent flip to on-demand.
-func onHostMaintenancePolicy(instanceType *cloudprovider.InstanceType, capacityType string) string {
+// Spot + z3-non-metal-lssd: spot requires TERMINATE, z3 non-metal lssd ≤18 TiB
+// requires MIGRATE; GCE rejects either combination. We pick TERMINATE so
+// the failure surfaces as the user's explicit spot request rather than a
+// silent flip to on-demand.
+//
+// z3 non-metal with >18 TiB bundled SSD: GCE rejects MIGRATE for these SKUs
+// (e.g. z3-highmem-88-highlssd, z3-highmem-176-standardlssd, both at 12 ×
+// 3000 GiB = ~35 TiB). The mt argument is the cache entry; when nil we fall
+// back to MIGRATE — the cache is normally populated for any SKU we
+// schedule, and a future high-SSD z3 SKU hitting an empty cache will fail
+// loud at GCE creation time rather than silently misbehave.
+//
+// Bare-metal (`*-metal`): physically cannot live-migrate (no VM-level state
+// to copy out-of-band). GCE's current default is TERMINATE, but we set it
+// explicitly so the branch contract is self-documenting rather than
+// relying on GCE's default.
+//
+// H4D (`h4d-*`): CPU-only HPC family that never supports live migration
+// (RDMA fabric requirements per AI Hypercomputer docs). TERMINATE is the
+// only supported policy. Set explicitly for the same reason as bare-metal.
+func onHostMaintenancePolicy(instanceType *cloudprovider.InstanceType, capacityType string, mt *computepb.MachineType) string {
 	if capacityType == karpv1.CapacityTypeSpot {
 		return "TERMINATE"
 	}
@@ -1068,7 +1122,20 @@ func onHostMaintenancePolicy(instanceType *cloudprovider.InstanceType, capacityT
 		return "TERMINATE"
 	}
 	if strings.HasPrefix(instanceType.Name, "z3-") && !strings.HasSuffix(instanceType.Name, "-metal") {
+		if mt != nil {
+			if bls := mt.GetBundledLocalSsds(); bls != nil && bls.PartitionCount != nil {
+				if localssd.TotalGiB(instanceType.Name, int(*bls.PartitionCount)) > z3HighSsdTiBThreshold*1024 {
+					return "TERMINATE"
+				}
+			}
+		}
 		return "MIGRATE"
+	}
+	if strings.HasSuffix(instanceType.Name, "-metal") {
+		return "TERMINATE"
+	}
+	if strings.HasPrefix(instanceType.Name, "h4d-") {
+		return "TERMINATE"
 	}
 	return ""
 }

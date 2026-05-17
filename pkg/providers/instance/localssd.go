@@ -20,28 +20,50 @@ import (
 	"fmt"
 	"strings"
 
+	"cloud.google.com/go/compute/apiv1/computepb"
+
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/apis/v1alpha1"
 )
 
-// localSSDBundled reports whether the named machine type bundles local SSDs
+// hasBundledLocalSSDs reports whether the named machine type bundles local SSDs
 // (count is fixed by the machine type, not user config).
 //
-// Suffix → families (verified 2026-05-17, see docs/claude/lssd-machine-type-audit.md):
+// The API field `MachineType.BundledLocalSsds.PartitionCount` is the
+// authoritative signal and is preferred when mt is non-nil. The name-based
+// fallback is used only when the instance-type cache is empty (e.g. partial
+// refresh, or a code path that doesn't have the MachineType in scope).
 //
-//	-lssd            C3, C3D, C4 VM, C4A, C4D, H4D
-//	-lssd-metal      C4 bare metal
-//	-standardlssd    Z3 only
-//	-highlssd        Z3 only
-//	-highlssd-metal  Z3 bare metal only
+// Name-based fallback families:
 //
-// Every Z3 SKU that ships local SSDs uses one of the three Z3-specific
-// suffixes; there is no bare "z3-*" SKU that bundles SSDs.
-func localSSDBundled(name string) bool {
-	return strings.HasSuffix(name, "-lssd") ||
+//	suffix -lssd / -lssd-metal              C3, C3D, C4 VM, C4A, C4D, H4D, C4 metal
+//	suffix -standardlssd / -highlssd        Z3 (incl. -highlssd-metal)
+//	prefix a2-ultragpu-                     A2 ultra (a2-standard is NOT bundled)
+//	prefix a3- / a4- / a4x-                 all current accelerator SKUs except -nolssd siblings
+//
+// `-nolssd` siblings (e.g. a3-ultragpu-8g-nolssd, a3-edgegpu-8g-nolssd) are
+// explicitly excluded by suffix.
+func hasBundledLocalSSDs(name string, mt *computepb.MachineType) bool {
+	if mt != nil {
+		if bls := mt.GetBundledLocalSsds(); bls != nil && bls.PartitionCount != nil && *bls.PartitionCount > 0 {
+			return true
+		}
+		// Cache hit with no bundled SSDs reported is authoritative: not bundled.
+		return false
+	}
+	if strings.HasSuffix(name, "-nolssd") {
+		return false
+	}
+	if strings.HasSuffix(name, "-lssd") ||
 		strings.HasSuffix(name, "-lssd-metal") ||
 		strings.HasSuffix(name, "-standardlssd") ||
 		strings.HasSuffix(name, "-highlssd") ||
-		strings.HasSuffix(name, "-highlssd-metal")
+		strings.HasSuffix(name, "-highlssd-metal") {
+		return true
+	}
+	return strings.HasPrefix(name, "a2-ultragpu-") ||
+		strings.HasPrefix(name, "a3-") ||
+		strings.HasPrefix(name, "a4-") ||
+		strings.HasPrefix(name, "a4x-")
 }
 
 // hasLegacyLocalSSDDisk reports whether the NodeClass declares any
@@ -63,8 +85,11 @@ func hasLegacyLocalSSDDisk(nodeClass *v1alpha1.GCENodeClass) bool {
 // already bundles them. The returned error is wrapped in *retryableError by
 // the caller so the Create loop falls through to a compatible instance type
 // rather than producing a node with more SCRATCH disks than the SKU allows.
-func evaluateLocalSSDConflict(nodeClass *v1alpha1.GCENodeClass, instanceTypeName string) error {
-	if nodeClass == nil || !localSSDBundled(instanceTypeName) {
+//
+// Pass mt from the instance-type cache when available; the helper prefers the
+// API signal over name-based matching.
+func evaluateLocalSSDConflict(nodeClass *v1alpha1.GCENodeClass, instanceTypeName string, mt *computepb.MachineType) error {
+	if nodeClass == nil || !hasBundledLocalSSDs(instanceTypeName, mt) {
 		return nil
 	}
 	if nodeClass.Spec.LocalSsdCount == 0 && !hasLegacyLocalSSDDisk(nodeClass) {

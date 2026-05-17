@@ -85,8 +85,8 @@ var _ = DescribeTable("Provisioning",
 		ImageFamily:   gcpv1alpha1.ImageFamilyUbuntu,
 	}, SpecTimeout(15*time.Minute)),
 	// Legacy disk-entry path: `disks: [{category: local-ssd}, ...]` still
-	// produces NVMe SCRATCH disks (regression guard for the SCRATCH-attach
-	// fix; deprecated in v1alpha1, removed at v1beta1).
+	// produces NVMe SCRATCH disks. Deprecated; covered here so the path
+	// keeps working until removed.
 	Entry("COS / amd64 / on-demand + 2 local SSDs (legacy)", environment.TestCase{
 		CapacityType:  karpv1.CapacityTypeOnDemand,
 		Arch:          karpv1.ArchitectureAmd64,

@@ -70,7 +70,8 @@ func TestPatchLocalSSDMetadata_NoMutationWhenCountZero(t *testing.T) {
 	bv := lo.FromPtr(before[0].Value)
 	bl := lo.FromPtr(before[1].Value)
 
-	after := PatchLocalSSDMetadata(before, v1alpha1.LocalSSDModeRawBlock, 0)
+	after, err := PatchLocalSSDMetadata(before, v1alpha1.LocalSSDModeRawBlock, 0)
+	require.NoError(t, err)
 
 	require.Len(t, after, 2)
 	assert.Equal(t, bv, lo.FromPtr(after[0].Value), "kube-env must not change")
@@ -81,7 +82,8 @@ func TestPatchLocalSSDMetadata_RawBlock(t *testing.T) {
 	t.Parallel()
 	items := mkItems("KUBELET_ARGS: --foo=bar\n", "a=b")
 
-	got := PatchLocalSSDMetadata(items, v1alpha1.LocalSSDModeRawBlock, 2)
+	got, err := PatchLocalSSDMetadata(items, v1alpha1.LocalSSDModeRawBlock, 2)
+	require.NoError(t, err)
 
 	line, ok := kubeEnvLine(got, "NODE_LOCAL_SSDS_EXT")
 	require.True(t, ok, "expected NODE_LOCAL_SSDS_EXT line in kube-env")
@@ -99,7 +101,8 @@ func TestPatchLocalSSDMetadata_Ephemeral(t *testing.T) {
 	t.Parallel()
 	items := mkItems("KUBELET_ARGS: --foo=bar\n", "a=b")
 
-	got := PatchLocalSSDMetadata(items, v1alpha1.LocalSSDModeEphemeral, 1)
+	got, err := PatchLocalSSDMetadata(items, v1alpha1.LocalSSDModeEphemeral, 1)
+	require.NoError(t, err)
 
 	line, ok := kubeEnvLine(got, "NODE_LOCAL_SSDS_EPHEMERAL")
 	require.True(t, ok, "expected NODE_LOCAL_SSDS_EPHEMERAL line in kube-env")
@@ -121,7 +124,8 @@ func TestPatchLocalSSDMetadata_UpsertReplacesExisting(t *testing.T) {
 	kubeLabels := "a=b,cloud.google.com/gke-local-nvme-ssd=true"
 	items := mkItems(kubeEnv, kubeLabels)
 
-	got := PatchLocalSSDMetadata(items, v1alpha1.LocalSSDModeRawBlock, 4)
+	got, err := PatchLocalSSDMetadata(items, v1alpha1.LocalSSDModeRawBlock, 4)
+	require.NoError(t, err)
 
 	// Only one NODE_LOCAL_SSDS_EXT line, with the new count.
 	value := lo.FromPtr(got[0].Value)
@@ -136,6 +140,45 @@ func TestPatchLocalSSDMetadata_UpsertReplacesExisting(t *testing.T) {
 		"label must not be duplicated")
 }
 
+func TestPatchLocalSSDMetadata_ErrorWhenKubeEnvMissing(t *testing.T) {
+	t.Parallel()
+	items := []*compute.MetadataItems{
+		{Key: "kube-labels", Value: lo.ToPtr("a=b")},
+	}
+	_, err := PatchLocalSSDMetadata(items, v1alpha1.LocalSSDModeRawBlock, 2)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "kube-env")
+}
+
+func TestPatchLocalSSDMetadata_ErrorWhenKubeLabelsMissing(t *testing.T) {
+	t.Parallel()
+	items := []*compute.MetadataItems{
+		{Key: "kube-env", Value: lo.ToPtr("KUBELET_ARGS: --foo=bar\n")},
+	}
+	_, err := PatchLocalSSDMetadata(items, v1alpha1.LocalSSDModeRawBlock, 2)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "kube-labels")
+}
+
+func TestPatchLocalSSDMetadata_AppendPreservesCanonicalShape(t *testing.T) {
+	t.Parallel()
+	// Canonical kube-env ends in "\n" and has no blank lines. Appending a
+	// new key must not introduce a blank line before the new entry and must
+	// preserve the trailing newline.
+	kubeEnv := "KUBELET_ARGS: --foo=bar\nDNS_SERVER_IP: 10.0.0.10\n"
+	items := mkItems(kubeEnv, "a=b")
+
+	got, err := PatchLocalSSDMetadata(items, v1alpha1.LocalSSDModeRawBlock, 2)
+	require.NoError(t, err)
+	envValue := lo.FromPtr(got[0].Value)
+
+	assert.NotContains(t, envValue, "\n\n", "no blank lines in kube-env output")
+	assert.True(t, strings.HasSuffix(envValue, "\n"), "trailing newline preserved")
+	assert.Equal(t,
+		"KUBELET_ARGS: --foo=bar\nDNS_SERVER_IP: 10.0.0.10\nNODE_LOCAL_SSDS_EXT: 2,nvme,block\n",
+		envValue)
+}
+
 func TestPatchLocalSSDMetadata_ModeFlipRemovesOldKeys(t *testing.T) {
 	t.Parallel()
 	// Start in Ephemeral state; switch to RawBlock.
@@ -143,7 +186,8 @@ func TestPatchLocalSSDMetadata_ModeFlipRemovesOldKeys(t *testing.T) {
 	kubeLabels := "a=b,cloud.google.com/gke-ephemeral-storage-local-ssd=true"
 	items := mkItems(kubeEnv, kubeLabels)
 
-	got := PatchLocalSSDMetadata(items, v1alpha1.LocalSSDModeRawBlock, 2)
+	got, err := PatchLocalSSDMetadata(items, v1alpha1.LocalSSDModeRawBlock, 2)
+	require.NoError(t, err)
 
 	envValue := lo.FromPtr(got[0].Value)
 	assert.NotContains(t, envValue, "NODE_LOCAL_SSDS_EPHEMERAL",

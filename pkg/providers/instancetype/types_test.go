@@ -192,10 +192,8 @@ func TestCalculateDiskConfiguration(t *testing.T) {
 			expectedSSDCount: 0,
 		},
 		{
-			// Empirically verified: c4d-highmem-8-lssd ships 1 × 375 GiB SSD,
-			// matching the API's PartitionCount. The previous 2250 GiB override
-			// was empirically wrong; removing it lets the default per-partition
-			// math apply.
+			// c4d-highmem-8-lssd ships 1 × 375 GiB SSD, matching the API's
+			// BundledLocalSsds.PartitionCount.
 			name:      "c4d-highmem-8-lssd: 1 partition x 375 GiB",
 			nodeClass: &v1alpha1.GCENodeClass{},
 			mt: &computepb.MachineType{
@@ -297,10 +295,9 @@ func TestCalculateDiskConfiguration(t *testing.T) {
 // Overhead.KubeReserved[ephemeral-storage] are attributed correctly based on
 // (machine type, LocalSsdMode, LocalSsdCount).
 //
-// Why this matters: RawBlock SSDs are NOT mounted as ephemeral storage, so
-// they must not contribute to Capacity or to the SSD-mode (50/75/100 GiB)
-// kubeReserved reservation. Today the calculation conflates the two and
-// over-promises ephemeral capacity on default RawBlock -lssd nodes.
+// RawBlock SSDs are not mounted as ephemeral storage and must not contribute
+// to Capacity or to the SSD-mode (50/75/100 GiB) kubeReserved reservation;
+// only Ephemeral mode does.
 func TestNewInstanceTypeModeAware(t *testing.T) {
 	const GiB = int64(1024) * 1024 * 1024
 

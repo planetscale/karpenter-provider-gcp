@@ -17,16 +17,33 @@ limitations under the License.
 package instance
 
 import (
-	"errors"
 	"testing"
 
+	"cloud.google.com/go/compute/apiv1/computepb"
+	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/apis/v1alpha1"
 )
 
-func TestLocalSSDBundled(t *testing.T) {
+// mtWithBundled returns a *computepb.MachineType reporting `count` bundled
+// local SSDs. count == 0 returns nil BundledLocalSsds, which is how the GCE
+// API represents a non-bundled SKU.
+func mtWithBundled(count int32) *computepb.MachineType {
+	if count == 0 {
+		return &computepb.MachineType{}
+	}
+	return &computepb.MachineType{
+		BundledLocalSsds: &computepb.BundledLocalSsds{
+			PartitionCount: lo.ToPtr(count),
+		},
+	}
+}
+
+// TestHasBundledLocalSSDs_NameFallback exercises the name-based fallback used
+// when the instance-type cache has no entry (mt == nil).
+func TestHasBundledLocalSSDs_NameFallback(t *testing.T) {
 	cases := []struct {
 		name string
 		want bool
@@ -57,6 +74,30 @@ func TestLocalSSDBundled(t *testing.T) {
 		// -highlssd-metal suffix (Z3 bare metal only)
 		{"z3-highmem-192-highlssd-metal", true},
 
+		// Accelerator families (a2-ultragpu-, a3-, a4-, a4x- prefixes)
+		{"a2-ultragpu-1g", true},
+		{"a2-ultragpu-2g", true},
+		{"a2-ultragpu-4g", true},
+		{"a2-ultragpu-8g", true},
+		{"a3-ultragpu-8g", true},
+		{"a3-megagpu-8g", true},
+		{"a3-highgpu-1g", true},
+		{"a3-highgpu-2g", true},
+		{"a3-highgpu-4g", true},
+		{"a3-highgpu-8g", true},
+		{"a3-edgegpu-8g", true},
+		{"a4-highgpu-8g", true},
+		{"a4x-highgpu-4g", true},
+
+		// -nolssd opt-out siblings — must NOT be flagged as bundled
+		{"a3-ultragpu-8g-nolssd", false},
+		{"a3-edgegpu-8g-nolssd", false},
+
+		// a2-standard / a2-highgpu / a2-megagpu — manual-attach only
+		{"a2-highgpu-1g", false},
+		{"a2-highgpu-8g", false},
+		{"a2-megagpu-16g", false},
+
 		// non-bundled families
 		{"n2-standard-8", false},
 		{"n2d-standard-8", false},
@@ -74,9 +115,28 @@ func TestLocalSSDBundled(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, localSSDBundled(tc.name))
+			assert.Equal(t, tc.want, hasBundledLocalSSDs(tc.name, nil))
 		})
 	}
+}
+
+// TestHasBundledLocalSSDs_APIPreferred asserts the API signal beats the name
+// in either direction: a -nolssd opt-out is correctly reported as not
+// bundled, and a SKU whose name suggests no SSDs but whose API field shows
+// bundled count is still flagged as bundled.
+func TestHasBundledLocalSSDs_APIPreferred(t *testing.T) {
+	t.Run("API says bundled, name says no", func(t *testing.T) {
+		// hypothetical future SKU without any known suffix/prefix
+		assert.True(t, hasBundledLocalSSDs("future-family-fancy-1", mtWithBundled(4)))
+	})
+	t.Run("API says not bundled, -nolssd sibling", func(t *testing.T) {
+		assert.False(t, hasBundledLocalSSDs("a3-ultragpu-8g-nolssd", mtWithBundled(0)))
+	})
+	t.Run("API authoritative over a3- prefix", func(t *testing.T) {
+		// If a hypothetical a3- variant ever lacks bundled SSDs, the API
+		// must win over the prefix fallback.
+		assert.False(t, hasBundledLocalSSDs("a3-some-future-variant", mtWithBundled(0)))
+	})
 }
 
 func TestHasLegacyLocalSSDDisk(t *testing.T) {
@@ -110,12 +170,14 @@ func TestEvaluateLocalSSDConflict(t *testing.T) {
 		name     string
 		nc       *v1alpha1.GCENodeClass
 		mtName   string
+		mt       *computepb.MachineType
 		wantConf bool
 	}{
 		{
 			name:     "bundled + top-level count → conflict",
 			nc:       &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 1}},
 			mtName:   "c4d-standard-8-lssd",
+			mt:       mtWithBundled(2),
 			wantConf: true,
 		},
 		{
@@ -124,47 +186,80 @@ func TestEvaluateLocalSSDConflict(t *testing.T) {
 				Disks: []v1alpha1.Disk{{Category: "local-ssd"}},
 			}},
 			mtName:   "z3-highmem-22-standardlssd",
+			mt:       mtWithBundled(12),
 			wantConf: true,
 		},
 		{
 			name:     "bundled z3 highlssd + top-level count → conflict",
 			nc:       &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 1}},
 			mtName:   "z3-highmem-22-highlssd",
+			mt:       mtWithBundled(24),
 			wantConf: true,
 		},
 		{
-			name:     "bundled c4 metal + legacy disk-entry → conflict",
+			name: "bundled c4 metal + legacy disk-entry → conflict",
 			nc: &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{
 				Disks: []v1alpha1.Disk{{Category: "local-ssd"}},
 			}},
 			mtName:   "c4-standard-288-lssd-metal",
+			mt:       mtWithBundled(32),
 			wantConf: true,
+		},
+		{
+			name:     "accelerator a3-highgpu-8g + top-level count → conflict",
+			nc:       &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 1}},
+			mtName:   "a3-highgpu-8g",
+			mt:       mtWithBundled(16),
+			wantConf: true,
+		},
+		{
+			name:     "accelerator a3-ultragpu-8g-nolssd + top-level count → no conflict (API says not bundled)",
+			nc:       &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 2}},
+			mtName:   "a3-ultragpu-8g-nolssd",
+			mt:       mtWithBundled(0),
+			wantConf: false,
+		},
+		{
+			name:     "accelerator + cache miss falls back to prefix → conflict",
+			nc:       &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 1}},
+			mtName:   "a4x-highgpu-4g",
+			mt:       nil,
+			wantConf: true,
+		},
+		{
+			name:     "-nolssd sibling + cache miss falls back to suffix exclusion → no conflict",
+			nc:       &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 1}},
+			mtName:   "a3-ultragpu-8g-nolssd",
+			mt:       nil,
+			wantConf: false,
 		},
 		{
 			name:     "bundled + no user SSD config → no conflict",
 			nc:       &v1alpha1.GCENodeClass{},
 			mtName:   "c4d-standard-8-lssd",
+			mt:       mtWithBundled(2),
 			wantConf: false,
 		},
 		{
 			name:     "non-bundled + top-level count → no conflict",
 			nc:       &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 2}},
 			mtName:   "n2d-standard-8",
+			mt:       mtWithBundled(0),
 			wantConf: false,
 		},
 		{
 			name:     "non-bundled + no user SSD config → no conflict",
 			nc:       &v1alpha1.GCENodeClass{},
 			mtName:   "n2d-standard-8",
+			mt:       mtWithBundled(0),
 			wantConf: false,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := evaluateLocalSSDConflict(tc.nc, tc.mtName)
+			err := evaluateLocalSSDConflict(tc.nc, tc.mtName, tc.mt)
 			if tc.wantConf {
 				require.Error(t, err, "expected conflict error")
-				assert.True(t, errors.Is(err, err), "sanity: error wraps itself")
 			} else {
 				require.NoError(t, err)
 			}
