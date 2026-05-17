@@ -141,6 +141,6 @@ var _ = DescribeTable("Provisioning",
 		InstanceTypes:        []string{"z3-highmem-22-standardlssd"},
 		BootDiskCategory:     "hyperdisk-balanced",
 		LocalSSDMode:         gcpv1alpha1.LocalSSDModeEphemeral,
-		ExpectedScratchDisks: 1,
+		ExpectedScratchDisks: 2,
 	}, SpecTimeout(15*time.Minute)),
 )

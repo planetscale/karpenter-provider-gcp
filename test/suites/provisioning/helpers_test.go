@@ -18,6 +18,7 @@ package provisioning_test
 
 import (
 	"context"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -107,14 +108,20 @@ func runProvisioningTest(ctx context.Context, tc environment.TestCase) {
 		Expect(scratch).To(Equal(expectedScratch),
 			"expected %d local SSDs on %s, got %d", expectedScratch, node.Name, scratch)
 
-		switch tc.LocalSSDMode {
-		case gcpv1alpha1.LocalSSDModeRawBlock, "":
-			Expect(node.Labels["cloud.google.com/gke-local-nvme-ssd"]).To(Equal("true"),
-				"expected gke-local-nvme-ssd=true node label")
-		case gcpv1alpha1.LocalSSDModeEphemeral:
-			Expect(node.Labels["cloud.google.com/gke-ephemeral-storage-local-ssd"]).To(Equal("true"),
-				"expected gke-ephemeral-storage-local-ssd=true node label")
+		// GKE-applied SSD labels (`cloud.google.com/gke-local-nvme-ssd`,
+		// `cloud.google.com/gke-ephemeral-storage-local-ssd`) are written by
+		// the bootstrapper and can land after the workload pod reaches Running,
+		// so poll instead of relying on the snapshot taken at line 80.
+		labelKey := "cloud.google.com/gke-local-nvme-ssd"
+		if tc.LocalSSDMode == gcpv1alpha1.LocalSSDModeEphemeral {
+			labelKey = "cloud.google.com/gke-ephemeral-storage-local-ssd"
 		}
+		Eventually(func(g Gomega) {
+			n, err := env.KubeClient.CoreV1().Nodes().Get(ctx, provisionedNodeName, metav1.GetOptions{})
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(n.Labels[labelKey]).To(Equal("true"),
+				"expected %s=true node label", labelKey)
+		}).WithTimeout(2*time.Minute).WithPolling(5*time.Second).Should(Succeed())
 	}
 
 	env.WaitForKubeProxyRunning(ctx, provisionedNodeName)
