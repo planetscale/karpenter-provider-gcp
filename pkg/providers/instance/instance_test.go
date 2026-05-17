@@ -1135,6 +1135,7 @@ func TestBuildInstance_UsesExternalCapacityTypeNotRecomputed(t *testing.T) {
 		cluster,
 		"default-pool", "us-central1-a", "karpenter-test",
 		karpv1.CapacityTypeSpot, // externally decided by Create() — must not be recomputed
+		nil, 0,
 	)
 	require.NoError(t, err)
 
@@ -1186,6 +1187,7 @@ func TestBuildInstance_GPUTaintInjected(t *testing.T) {
 		cluster,
 		"default-pool", "us-central1-a", "karpenter-gpu-test",
 		karpv1.CapacityTypeOnDemand,
+		nil, 0,
 	)
 
 	require.NoError(t, err)
@@ -1243,6 +1245,7 @@ func TestBuildInstance_GPUTaintNotInjectedWhenDisabled(t *testing.T) {
 		cluster,
 		"default-pool", "us-central1-a", "karpenter-gpu-test",
 		karpv1.CapacityTypeOnDemand,
+		nil, 0,
 	)
 
 	require.NoError(t, err)
@@ -1304,6 +1307,7 @@ func TestBuildInstance_GPUTaintInjected_AttachedGPU(t *testing.T) {
 		cluster,
 		"default-pool", "us-central1-a", "karpenter-gpu-test",
 		karpv1.CapacityTypeOnDemand,
+		nil, 0,
 	)
 
 	require.NoError(t, err)

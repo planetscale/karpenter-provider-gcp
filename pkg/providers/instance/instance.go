@@ -368,7 +368,23 @@ func (p *DefaultProvider) tryCreateInstance(ctx context.Context, nodeClass *v1al
 	if p.instanceTypeProvider != nil {
 		mt = p.instanceTypeProvider.GetMachineType(instanceType.Name)
 	}
+	// evaluateLocalSSDConflict tolerates a nil mt (falls back to the name-suffix
+	// predicate) because a conflict between user config and a name-recognised
+	// bundled family is always a config bug, not a cache state issue.
 	if err := evaluateLocalSSDConflict(nodeClass, instanceType.Name, mt); err != nil {
+		return nil, "", nil, &retryableError{err}
+	}
+
+	// resolveLocalSSDCount, by contrast, errors on nil mt for a bundled name
+	// because we cannot derive an authoritative partition count from the name
+	// alone — silent-zero would boot a node whose physical SSDs are never
+	// formatted by the GKE bootstrapper. We wrap the error retryable so the
+	// Create loop falls through to the next candidate on transient cache
+	// inconsistencies, but log at Error so the controller surfaces the cause
+	// even when the loop ultimately exhausts and reports an aggregated error.
+	ssdCount, err := resolveLocalSSDCount(nodeClass, instanceType.Name, mt)
+	if err != nil {
+		log.FromContext(ctx).Error(err, "resolveLocalSSDCount failed; treating as retryable", "instanceType", instanceType.Name)
 		return nil, "", nil, &retryableError{err}
 	}
 
@@ -402,7 +418,7 @@ func (p *DefaultProvider) tryCreateInstance(ctx context.Context, nodeClass *v1al
 		return nil, "", nil, &retryableError{err}
 	}
 
-	instance, retryable, err := p.getOrCreateInstance(ctx, nodeClaim, nodeClass, instanceType, template, clusterConfig, nodePoolName, zone, capacityType)
+	instance, retryable, err := p.getOrCreateInstance(ctx, nodeClaim, nodeClass, instanceType, template, clusterConfig, nodePoolName, zone, capacityType, mt, ssdCount)
 	if err != nil {
 		if retryable {
 			return nil, "", nil, &retryableError{err}
@@ -413,7 +429,7 @@ func (p *DefaultProvider) tryCreateInstance(ctx context.Context, nodeClass *v1al
 	return instance, zone, template, nil
 }
 
-func (p *DefaultProvider) getOrCreateInstance(ctx context.Context, nodeClaim *karpv1.NodeClaim, nodeClass *v1alpha1.GCENodeClass, instanceType *cloudprovider.InstanceType, template *compute.InstanceTemplate, clusterConfig *container.Cluster, nodePoolName, zone, capacityType string) (*compute.Instance, bool, error) {
+func (p *DefaultProvider) getOrCreateInstance(ctx context.Context, nodeClaim *karpv1.NodeClaim, nodeClass *v1alpha1.GCENodeClass, instanceType *cloudprovider.InstanceType, template *compute.InstanceTemplate, clusterConfig *container.Cluster, nodePoolName, zone, capacityType string, mt *computepb.MachineType, ssdCount int) (*compute.Instance, bool, error) {
 	instanceName := fmt.Sprintf("karpenter-%s", nodeClaim.Name)
 	instance, exists, err := p.isInstanceExists(ctx, zone, instanceName)
 	if err != nil {
@@ -425,7 +441,7 @@ func (p *DefaultProvider) getOrCreateInstance(ctx context.Context, nodeClaim *ka
 		return instance, false, nil
 	}
 
-	instance, err = p.buildInstance(nodeClaim, nodeClass, instanceType, template, clusterConfig, nodePoolName, zone, instanceName, capacityType)
+	instance, err = p.buildInstance(nodeClaim, nodeClass, instanceType, template, clusterConfig, nodePoolName, zone, instanceName, capacityType, mt, ssdCount)
 	if err != nil {
 		return nil, false, fmt.Errorf("building instance %s: %w", instanceName, err)
 	}
@@ -724,7 +740,7 @@ func (p *DefaultProvider) scratchDisk(zone string) *compute.AttachedDisk {
 	}
 }
 
-func (p *DefaultProvider) buildInstance(nodeClaim *karpv1.NodeClaim, nodeClass *v1alpha1.GCENodeClass, instanceType *cloudprovider.InstanceType, template *compute.InstanceTemplate, clusterConfig *container.Cluster, nodePoolName, zone, instanceName, capacityType string) (*compute.Instance, error) {
+func (p *DefaultProvider) buildInstance(nodeClaim *karpv1.NodeClaim, nodeClass *v1alpha1.GCENodeClass, instanceType *cloudprovider.InstanceType, template *compute.InstanceTemplate, clusterConfig *container.Cluster, nodePoolName, zone, instanceName, capacityType string, mt *computepb.MachineType, ssdCount int) (*compute.Instance, error) {
 	attachedDisks, err := p.renderDiskProperties(instanceType, nodeClass, zone)
 	if err != nil {
 		return nil, fmt.Errorf("rendering disk properties: %w", err)
@@ -734,7 +750,7 @@ func (p *DefaultProvider) buildInstance(nodeClaim *karpv1.NodeClaim, nodeClass *
 		instanceType.Requirements.Get(v1alpha1.LabelInstanceGPUCount).Len() > 0
 
 	// Setup metadata
-	if err := p.setupInstanceMetadata(template.Properties.Metadata, nodeClass, instanceType, nodeClaim, nodePoolName, capacityType, isGPUInstance); err != nil {
+	if err := p.setupInstanceMetadata(template.Properties.Metadata, nodeClass, instanceType, nodeClaim, nodePoolName, capacityType, isGPUInstance, ssdCount); err != nil {
 		return nil, fmt.Errorf("setting up instance metadata: %w", err)
 	}
 
@@ -776,10 +792,6 @@ func (p *DefaultProvider) buildInstance(nodeClaim *karpv1.NodeClaim, nodeClass *
 	// Configure capacity provision
 	p.configureInstanceCapacityProvision(instance, capacityType)
 
-	var mt *computepb.MachineType
-	if p.instanceTypeProvider != nil {
-		mt = p.instanceTypeProvider.GetMachineType(instanceType.Name)
-	}
 	if policy := onHostMaintenancePolicy(instanceType, capacityType, mt); policy != "" {
 		instance.Scheduling.OnHostMaintenance = policy
 	}
@@ -886,8 +898,11 @@ func podCIDRRange(maxPods int32) int32 {
 	}
 }
 
-// setupInstanceMetadata configures all metadata-related settings for the instance
-func (p *DefaultProvider) setupInstanceMetadata(instanceMetadata *compute.Metadata, nodeClass *v1alpha1.GCENodeClass, instanceType *cloudprovider.InstanceType, nodeClaim *karpv1.NodeClaim, nodePoolName string, capacityType string, isGPUInstance bool) error {
+// setupInstanceMetadata configures all metadata-related settings for the instance.
+// ssdCount is the pre-resolved local-SSD count from resolveLocalSSDCount; the
+// caller threads it down so we don't re-fetch the MachineType here (the second
+// cache lookup would race against UpdateInstanceTypes between the call sites).
+func (p *DefaultProvider) setupInstanceMetadata(instanceMetadata *compute.Metadata, nodeClass *v1alpha1.GCENodeClass, instanceType *cloudprovider.InstanceType, nodeClaim *karpv1.NodeClaim, nodePoolName string, capacityType string, isGPUInstance bool, ssdCount int) error {
 	if err := metadata.RemoveGKEBuiltinLabels(instanceMetadata, nodePoolName); err != nil {
 		return fmt.Errorf("failed to remove GKE builtin labels from metadata: %w", err)
 	}
@@ -924,10 +939,6 @@ func (p *DefaultProvider) setupInstanceMetadata(instanceMetadata *compute.Metada
 	metadata.AppendRegisteredLabel(instanceMetadata)
 	metadata.AppendSecondaryBootDisks(p.projectID, nodeClass, instanceMetadata)
 
-	ssdCount, err := p.resolveLocalSSDCount(nodeClass, instanceType.Name)
-	if err != nil {
-		return fmt.Errorf("failed to resolve local SSD count: %w", err)
-	}
 	if ssdCount > 0 {
 		patched, err := metadata.PatchLocalSSDMetadata(
 			instanceMetadata.Items,
@@ -962,19 +973,19 @@ func (p *DefaultProvider) setupInstanceMetadata(instanceMetadata *compute.Metada
 // accelerator families that lack an -lssd-family suffix).
 //
 // Returns 0 if none apply (helper short-circuits to no-op). Returns an error
-// when the suffix says the SKU bundles local SSDs but the instance-type cache
-// has no entry — we cannot know the count, and silently proceeding would boot
-// a node whose physical SSDs are never formatted/labelled by the bootstrapper.
-func (p *DefaultProvider) resolveLocalSSDCount(nodeClass *v1alpha1.GCENodeClass, instanceTypeName string) (int, error) {
-	if p.instanceTypeProvider != nil {
-		mt := p.instanceTypeProvider.GetMachineType(instanceTypeName)
-		if mt != nil {
-			if bls := mt.GetBundledLocalSsds(); bls != nil && bls.PartitionCount != nil && *bls.PartitionCount > 0 {
-				return int(*bls.PartitionCount), nil
-			}
-		} else if hasBundledLocalSSDs(instanceTypeName, nil) {
-			return 0, fmt.Errorf("machine type %s bundles local SSDs but is not in the instance-type cache; refusing to create without an authoritative SSD count", instanceTypeName)
+// when the suffix says the SKU bundles local SSDs but the caller has no
+// MachineType for it (cache miss at the call site) — we cannot know the count,
+// and silently proceeding would boot a node whose physical SSDs are never
+// formatted/labelled by the bootstrapper. The caller is responsible for
+// wrapping that error in &retryableError{} so the Create loop falls through
+// to the next candidate instance type instead of failing the NodeClaim.
+func resolveLocalSSDCount(nodeClass *v1alpha1.GCENodeClass, instanceTypeName string, mt *computepb.MachineType) (int, error) {
+	if mt != nil {
+		if bls := mt.GetBundledLocalSsds(); bls != nil && bls.PartitionCount != nil && *bls.PartitionCount > 0 {
+			return int(*bls.PartitionCount), nil
 		}
+	} else if hasBundledLocalSSDs(instanceTypeName, nil) {
+		return 0, fmt.Errorf("machine type %s bundles local SSDs but is not in the instance-type cache; refusing to create without an authoritative SSD count", instanceTypeName)
 	}
 	if nodeClass.Spec.LocalSsdCount > 0 {
 		return int(nodeClass.Spec.LocalSsdCount), nil
