@@ -292,6 +292,8 @@ func (p *DefaultProvider) Create(ctx context.Context, nodeClass *v1alpha1.GCENod
 		return nil, fmt.Errorf("no instance types provided")
 	}
 
+	warnLegacyLocalSSDDisks(ctx, nodeClass)
+
 	instanceTypes = orderInstanceTypesByPrice(instanceTypes, scheduling.NewNodeSelectorRequirementsWithMinValues(nodeClaim.Spec.Requirements...))
 	capacityType := p.getCapacityType(nodeClaim, instanceTypes)
 
@@ -953,6 +955,28 @@ func (p *DefaultProvider) resolveLocalSSDCount(nodeClass *v1alpha1.GCENodeClass,
 		}
 	}
 	return legacy
+}
+
+// warnLegacyLocalSSDDisks logs a deprecation warning for each
+// `spec.disks[].category == "local-ssd"` entry on the NodeClass. Emitted per
+// provisioning attempt (not once at apply time) so the warning lands next to
+// the provisioning log line in the controller output.
+func warnLegacyLocalSSDDisks(ctx context.Context, nodeClass *v1alpha1.GCENodeClass) {
+	for i, d := range nodeClass.Spec.Disks {
+		if d.Category != "local-ssd" {
+			continue
+		}
+		log.FromContext(ctx).Info(
+			"spec.disks[].category=local-ssd is deprecated; set spec.localSsdCount instead",
+			"nodeClass", nodeClass.Name, "diskIndex", i,
+		)
+		if d.SizeGiB > 0 {
+			log.FromContext(ctx).Info(
+				"spec.disks[].sizeGiB is ignored for category=local-ssd; size is fixed by the machine family",
+				"nodeClass", nodeClass.Name, "diskIndex", i, "sizeGiB", d.SizeGiB,
+			)
+		}
+	}
 }
 
 // setupGPUMetadata injects the nvidia.com/gpu=present:NoSchedule taint into KUBELET_ARGS
