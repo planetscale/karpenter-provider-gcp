@@ -40,6 +40,7 @@ GSA_EMAIL="${GSA_ID}@${E2E_PROJECT_ID}.iam.gserviceaccount.com"
 AR_REPO="${E2E_PREFIX}-images"
 ROUTER_NAME="${E2E_PREFIX}-router"
 NAT_NAME="${E2E_PREFIX}-nat"
+IAP_FW_NAME="${E2E_PREFIX}-iap-ssh"
 IMAGE_REPO="${E2E_REGION}-docker.pkg.dev/${E2E_PROJECT_ID}/${AR_REPO}/karpenter"
 
 PRIMARY_CIDR="10.0.0.0/20"
@@ -119,6 +120,25 @@ else
     --region "${E2E_REGION}" \
     --auto-allocate-nat-external-ips \
     --nat-all-subnet-ip-ranges \
+    --project "${E2E_PROJECT_ID}" \
+    --quiet
+fi
+
+# IAP SSH firewall — needed so `gcloud compute ssh --tunnel-through-iap` can
+# reach e2e nodes for debugging. Restricted to the IAP forwarding range so it
+# does not open SSH to the public internet.
+if gcloud compute firewall-rules describe "${IAP_FW_NAME}" \
+    --project "${E2E_PROJECT_ID}" --format='value(name)' &>/dev/null; then
+  log "Reusing firewall rule ${IAP_FW_NAME}"
+else
+  log "Creating firewall rule ${IAP_FW_NAME} (IAP -> tcp:22)..."
+  gcloud compute firewall-rules create "${IAP_FW_NAME}" \
+    --network "${NETWORK_NAME}" \
+    --direction INGRESS \
+    --action ALLOW \
+    --source-ranges 35.235.240.0/20 \
+    --rules tcp:22 \
+    --description "IAP TCP forwarding for SSH to e2e nodes" \
     --project "${E2E_PROJECT_ID}" \
     --quiet
 fi

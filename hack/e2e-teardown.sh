@@ -36,6 +36,7 @@ GSA_EMAIL="${GSA_ID}@${E2E_PROJECT_ID}.iam.gserviceaccount.com"
 AR_REPO="${E2E_PREFIX}-images"
 ROUTER_NAME="${E2E_PREFIX}-router"
 NAT_NAME="${E2E_PREFIX}-nat"
+IAP_FW_NAME="${E2E_PREFIX}-iap-ssh"
 
 gcloud auth activate-service-account \
   --key-file "${GOOGLE_APPLICATION_CREDENTIALS}" \
@@ -111,6 +112,17 @@ if gcloud iam service-accounts describe "${GSA_EMAIL}" \
   gcloud iam service-accounts delete "${GSA_EMAIL}" \
     --project "${E2E_PROJECT_ID}" \
     --quiet
+fi
+
+# IAP SSH firewall — safe to remove any time, but do it before the VPC.
+if gcloud compute firewall-rules describe "${IAP_FW_NAME}" \
+    --project "${E2E_PROJECT_ID}" &>/dev/null; then
+  log "Deleting firewall rule ${IAP_FW_NAME}..."
+  gcloud compute firewall-rules delete "${IAP_FW_NAME}" \
+    --project "${E2E_PROJECT_ID}" \
+    --quiet
+else
+  log "Firewall rule ${IAP_FW_NAME} not found, skipping."
 fi
 
 # Cloud NAT — must be removed before the router and subnet.
