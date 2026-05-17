@@ -36,10 +36,6 @@ var table = map[string]entry{
 	// z3 uses 3 TiB NVMe per partition; all other families use 375 GiB
 	"z3": {perPartGiB: 3000},
 
-	// c4d lssd variants: Compute API reports PartitionCount=1 but actual capacity differs
-	"c4d-highmem-8-lssd":  {totalGiB: 2250}, // 6 × 375 GiB
-	"c4d-highmem-16-lssd": {totalGiB: 3000}, // 8 × 375 GiB
-
 	// Bare-metal variants use 3000 GiB per partition (not 375 GiB)
 	"c4-highmem-288-lssd-metal":     {totalGiB: 18000}, // 6 × 3000 GiB
 	"c4-standard-288-lssd-metal":    {totalGiB: 18000}, // 6 × 3000 GiB

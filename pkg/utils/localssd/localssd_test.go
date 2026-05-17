@@ -37,9 +37,11 @@ func TestTotalGiB(t *testing.T) {
 		{"z3 standard: 4 × 3000", "z3-highmem-88-standardlssd", 4, 12000},
 		{"z3 high: 2 × 3000", "z3-highmem-176-highlssd", 2, 6000},
 
+		// c4d lssd variants: empirically 1 × 375 GiB (no override needed)
+		{"c4d-highmem-8-lssd: 1 × 375", "c4d-highmem-8-lssd", 1, 375},
+		{"c4d-highmem-16-lssd: 1 × 375", "c4d-highmem-16-lssd", 1, 375},
+
 		// Machine-level total overrides (wrong PartitionCount from Compute API)
-		{"c4d-highmem-8-lssd override", "c4d-highmem-8-lssd", 1, 2250},
-		{"c4d-highmem-16-lssd override", "c4d-highmem-16-lssd", 1, 3000},
 		{"c4-highmem-288-lssd-metal override", "c4-highmem-288-lssd-metal", 6, 18000},
 		{"c4-standard-288-lssd-metal override", "c4-standard-288-lssd-metal", 6, 18000},
 		{"z3-highmem-192-highlssd-metal override", "z3-highmem-192-highlssd-metal", 12, 72000},
