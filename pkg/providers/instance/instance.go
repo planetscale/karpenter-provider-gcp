@@ -770,9 +770,8 @@ func (p *DefaultProvider) buildInstance(nodeClaim *karpv1.NodeClaim, nodeClass *
 	// Configure capacity provision
 	p.configureInstanceCapacityProvision(instance, capacityType)
 
-	// A2, A3, G2 machine types have built-in GPUs and do not support live migration.
-	if instanceType.Requirements.Get(v1alpha1.LabelInstanceGPUCount).Len() > 0 {
-		instance.Scheduling.OnHostMaintenance = "TERMINATE"
+	if policy := onHostMaintenancePolicy(instanceType, capacityType); policy != "" {
+		instance.Scheduling.OnHostMaintenance = policy
 	}
 
 	// Setup karpenter built-in labels
@@ -1047,8 +1046,31 @@ func (p *DefaultProvider) configureInstanceCapacityProvision(instance *compute.I
 		instance.Scheduling.ProvisioningModel = "SPOT"
 		instance.Scheduling.Preemptible = true
 		instance.Scheduling.AutomaticRestart = ptr.To(false)
-		instance.Scheduling.OnHostMaintenance = "TERMINATE"
 	}
+}
+
+// onHostMaintenancePolicy returns the GCE Scheduling.OnHostMaintenance value
+// required by the (instanceType, capacityType) pair, or "" to leave the GCE
+// default (MIGRATE for non-spot, TERMINATE for spot). Ordering matters:
+// spot wins over GPU wins over z3. If z3 ever ships a GPU SKU, GPU's
+// TERMINATE would override z3's MIGRATE and GCE would reject the create —
+// today's catalogue has no such SKU.
+//
+// Spot + z3-non-metal-lssd is intentionally not reconciled here: spot
+// requires TERMINATE, z3 non-metal lssd requires MIGRATE, and GCE rejects
+// both combinations. We prefer spot's TERMINATE so the failure mode is the
+// user's explicit spot request, not a silent flip to on-demand.
+func onHostMaintenancePolicy(instanceType *cloudprovider.InstanceType, capacityType string) string {
+	if capacityType == karpv1.CapacityTypeSpot {
+		return "TERMINATE"
+	}
+	if instanceType.Requirements.Get(v1alpha1.LabelInstanceGPUCount).Len() > 0 {
+		return "TERMINATE"
+	}
+	if strings.HasPrefix(instanceType.Name, "z3-") && !strings.HasSuffix(instanceType.Name, "-metal") {
+		return "MIGRATE"
+	}
+	return ""
 }
 
 // setupInstanceLabels writes all GCE labels for a new instance. Cluster-identity labels

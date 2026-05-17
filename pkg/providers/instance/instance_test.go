@@ -1598,3 +1598,50 @@ func TestSetupServiceAccounts_ErrorWhenNoSAAvailable(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no service account available")
 }
+
+func TestOnHostMaintenancePolicy(t *testing.T) {
+	t.Parallel()
+
+	// Mirror the instancetype builder: every instance type defines the GPU
+	// count label — OpIn("1") on GPU SKUs, OpDoesNotExist otherwise.
+	newIT := func(name string, gpu bool) *cloudprovider.InstanceType {
+		gpuReq := scheduling.NewRequirement(v1alpha1.LabelInstanceGPUCount, corev1.NodeSelectorOpDoesNotExist)
+		if gpu {
+			gpuReq = scheduling.NewRequirement(v1alpha1.LabelInstanceGPUCount, corev1.NodeSelectorOpIn, "1")
+		}
+		return &cloudprovider.InstanceType{Name: name, Requirements: scheduling.NewRequirements(gpuReq)}
+	}
+
+	cases := []struct {
+		name         string
+		instanceType *cloudprovider.InstanceType
+		capacityType string
+		want         string
+	}{
+		{"z3 non-metal lssd on-demand requires MIGRATE",
+			newIT("z3-highmem-22-standardlssd", false), karpv1.CapacityTypeOnDemand, "MIGRATE"},
+		{"z3 non-metal lssd spot keeps TERMINATE (spot wins)",
+			newIT("z3-highmem-22-standardlssd", false), karpv1.CapacityTypeSpot, "TERMINATE"},
+		{"z3 highlssd-metal on-demand falls through (bare metal must not MIGRATE)",
+			newIT("z3-highmem-192-highlssd-metal", false), karpv1.CapacityTypeOnDemand, ""},
+		{"c4 lssd-metal on-demand falls through (bare metal)",
+			newIT("c4-standard-288-lssd-metal", false), karpv1.CapacityTypeOnDemand, ""},
+		{"GPU on-demand returns TERMINATE",
+			newIT("a2-highgpu-1g", true), karpv1.CapacityTypeOnDemand, "TERMINATE"},
+		{"n2d on-demand falls through",
+			newIT("n2d-standard-4", false), karpv1.CapacityTypeOnDemand, ""},
+		{"n2d spot returns TERMINATE",
+			newIT("n2d-standard-4", false), karpv1.CapacityTypeSpot, "TERMINATE"},
+		{"c4d-lssd on-demand falls through (GCE accepts MIGRATE or TERMINATE)",
+			newIT("c4d-standard-8-lssd", false), karpv1.CapacityTypeOnDemand, ""},
+		{"c4a-lssd on-demand falls through (GCE accepts MIGRATE or TERMINATE)",
+			newIT("c4a-standard-8-lssd", false), karpv1.CapacityTypeOnDemand, ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, onHostMaintenancePolicy(tc.instanceType, tc.capacityType))
+		})
+	}
+}
