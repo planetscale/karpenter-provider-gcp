@@ -31,21 +31,31 @@ func TestLocalSSDBundled(t *testing.T) {
 		name string
 		want bool
 	}{
-		// -lssd suffix family (c4d/c4a)
-		{"c4d-standard-8-lssd", true},
+		// -lssd suffix (C3, C3D, C4 VM, C4A, C4D, H4D)
+		{"c3-standard-88-lssd", true},
+		{"c3d-highmem-360-lssd", true},
+		{"c4-standard-32-lssd", true},
 		{"c4a-standard-72-lssd", true},
+		{"c4d-standard-8-lssd", true},
 		{"c4d-standard-96-lssd", true},
+		{"h4d-highmem-192-lssd", true},
 
-		// -standardlssd suffix (z3)
+		// -lssd-metal suffix (C4 bare metal)
+		{"c4-standard-288-lssd-metal", true},
+		{"c4-highmem-288-lssd-metal", true},
+
+		// -standardlssd suffix (Z3 only)
+		{"z3-highmem-14-standardlssd", true},
 		{"z3-highmem-22-standardlssd", true},
 		{"z3-highmem-88-standardlssd", true},
 
-		// -highlssd-metal suffix
-		{"z3-highmem-192-highlssd-metal", true},
+		// -highlssd suffix (Z3 only)
+		{"z3-highmem-8-highlssd", true},
+		{"z3-highmem-22-highlssd", true},
+		{"z3-highmem-88-highlssd", true},
 
-		// legacy z3 SKUs without explicit suffix still bundle SSDs
-		{"z3-highmem-88", true},
-		{"z3-highmem-22", true},
+		// -highlssd-metal suffix (Z3 bare metal only)
+		{"z3-highmem-192-highlssd-metal", true},
 
 		// non-bundled families
 		{"n2-standard-8", false},
@@ -53,6 +63,11 @@ func TestLocalSSDBundled(t *testing.T) {
 		{"c2-standard-4", false},
 		{"m1-ultramem-40", false},
 		{"e2-medium", false},
+
+		// z3 without an SSD suffix is not a real SKU; predicate must not
+		// guess that bare "z3-*" bundles SSDs.
+		{"z3-highmem-22", false},
+		{"z3-highmem-88", false},
 
 		// near-miss: "ssd" anywhere in the name shouldn't trigger
 		{"some-ssd-family", false},
@@ -112,9 +127,17 @@ func TestEvaluateLocalSSDConflict(t *testing.T) {
 			wantConf: true,
 		},
 		{
-			name:     "bundled legacy z3 + top-level count → conflict",
+			name:     "bundled z3 highlssd + top-level count → conflict",
 			nc:       &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 1}},
-			mtName:   "z3-highmem-88",
+			mtName:   "z3-highmem-22-highlssd",
+			wantConf: true,
+		},
+		{
+			name:     "bundled c4 metal + legacy disk-entry → conflict",
+			nc: &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{
+				Disks: []v1alpha1.Disk{{Category: "local-ssd"}},
+			}},
+			mtName:   "c4-standard-288-lssd-metal",
 			wantConf: true,
 		},
 		{

@@ -357,6 +357,10 @@ func (e *retryableError) Error() string {
 }
 
 func (p *DefaultProvider) tryCreateInstance(ctx context.Context, nodeClass *v1alpha1.GCENodeClass, nodeClaim *karpv1.NodeClaim, instanceType *cloudprovider.InstanceType, capacityType string) (*compute.Instance, string, *compute.InstanceTemplate, error) {
+	if err := evaluateLocalSSDConflict(nodeClass, instanceType.Name); err != nil {
+		return nil, "", nil, &retryableError{err}
+	}
+
 	zone, err := p.selectZone(ctx, nodeClaim, instanceType, capacityType)
 	if err != nil {
 		log.FromContext(ctx).Error(err, "failed to select zone for instance type", "instanceType", instanceType.Name)
