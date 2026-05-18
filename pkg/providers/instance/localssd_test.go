@@ -27,10 +27,10 @@ import (
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/apis/v1alpha1"
 )
 
-// mtWithBundled returns a *computepb.MachineType reporting `count` bundled
+// machineTypeWithBundledSSDs returns a *computepb.MachineType reporting `count` bundled
 // local SSDs. count == 0 returns nil BundledLocalSsds, which is how the GCE
 // API represents a non-bundled SKU.
-func mtWithBundled(count int32) *computepb.MachineType {
+func machineTypeWithBundledSSDs(count int32) *computepb.MachineType {
 	if count == 0 {
 		return &computepb.MachineType{}
 	}
@@ -127,15 +127,15 @@ func TestHasBundledLocalSSDs_NameFallback(t *testing.T) {
 func TestHasBundledLocalSSDs_APIPreferred(t *testing.T) {
 	t.Run("API says bundled, name says no", func(t *testing.T) {
 		// hypothetical future SKU without any known suffix/prefix
-		assert.True(t, hasBundledLocalSSDs("future-family-fancy-1", mtWithBundled(4)))
+		assert.True(t, hasBundledLocalSSDs("future-family-fancy-1", machineTypeWithBundledSSDs(4)))
 	})
 	t.Run("API says not bundled, -nolssd sibling", func(t *testing.T) {
-		assert.False(t, hasBundledLocalSSDs("a3-ultragpu-8g-nolssd", mtWithBundled(0)))
+		assert.False(t, hasBundledLocalSSDs("a3-ultragpu-8g-nolssd", machineTypeWithBundledSSDs(0)))
 	})
 	t.Run("API authoritative over a3- prefix", func(t *testing.T) {
 		// If a hypothetical a3- variant ever lacks bundled SSDs, the API
 		// must win over the prefix fallback.
-		assert.False(t, hasBundledLocalSSDs("a3-some-future-variant", mtWithBundled(0)))
+		assert.False(t, hasBundledLocalSSDs("a3-some-future-variant", machineTypeWithBundledSSDs(0)))
 	})
 }
 
@@ -177,7 +177,7 @@ func TestEvaluateLocalSSDConflict(t *testing.T) {
 			name:     "bundled + top-level count → conflict",
 			nc:       &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 1}},
 			mtName:   "c4d-standard-8-lssd",
-			mt:       mtWithBundled(2),
+			mt:       machineTypeWithBundledSSDs(2),
 			wantConf: true,
 		},
 		{
@@ -186,14 +186,14 @@ func TestEvaluateLocalSSDConflict(t *testing.T) {
 				Disks: []v1alpha1.Disk{{Category: "local-ssd"}},
 			}},
 			mtName:   "z3-highmem-22-standardlssd",
-			mt:       mtWithBundled(12),
+			mt:       machineTypeWithBundledSSDs(12),
 			wantConf: true,
 		},
 		{
 			name:     "bundled z3 highlssd + top-level count → conflict",
 			nc:       &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 1}},
 			mtName:   "z3-highmem-22-highlssd",
-			mt:       mtWithBundled(24),
+			mt:       machineTypeWithBundledSSDs(24),
 			wantConf: true,
 		},
 		{
@@ -202,21 +202,21 @@ func TestEvaluateLocalSSDConflict(t *testing.T) {
 				Disks: []v1alpha1.Disk{{Category: "local-ssd"}},
 			}},
 			mtName:   "c4-standard-288-lssd-metal",
-			mt:       mtWithBundled(32),
+			mt:       machineTypeWithBundledSSDs(32),
 			wantConf: true,
 		},
 		{
 			name:     "accelerator a3-highgpu-8g + top-level count → conflict",
 			nc:       &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 1}},
 			mtName:   "a3-highgpu-8g",
-			mt:       mtWithBundled(16),
+			mt:       machineTypeWithBundledSSDs(16),
 			wantConf: true,
 		},
 		{
 			name:     "accelerator a3-ultragpu-8g-nolssd + top-level count → no conflict (API says not bundled)",
 			nc:       &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 2}},
 			mtName:   "a3-ultragpu-8g-nolssd",
-			mt:       mtWithBundled(0),
+			mt:       machineTypeWithBundledSSDs(0),
 			wantConf: false,
 		},
 		{
@@ -237,21 +237,21 @@ func TestEvaluateLocalSSDConflict(t *testing.T) {
 			name:     "bundled + no user SSD config → no conflict",
 			nc:       &v1alpha1.GCENodeClass{},
 			mtName:   "c4d-standard-8-lssd",
-			mt:       mtWithBundled(2),
+			mt:       machineTypeWithBundledSSDs(2),
 			wantConf: false,
 		},
 		{
 			name:     "non-bundled + top-level count → no conflict",
 			nc:       &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 2}},
 			mtName:   "n2d-standard-8",
-			mt:       mtWithBundled(0),
+			mt:       machineTypeWithBundledSSDs(0),
 			wantConf: false,
 		},
 		{
 			name:     "non-bundled + no user SSD config → no conflict",
 			nc:       &v1alpha1.GCENodeClass{},
 			mtName:   "n2d-standard-8",
-			mt:       mtWithBundled(0),
+			mt:       machineTypeWithBundledSSDs(0),
 			wantConf: false,
 		},
 	}

@@ -58,20 +58,20 @@ func PatchLocalSSDMetadata(items []*compute.MetadataItems, mode v1alpha1.LocalSS
 	}
 
 	var (
-		envKeep, envDrop, envLine string
-		labelKeep, labelDrop      string
+		envKey, envValue, envDrop string
+		labelKey, labelDrop       string
 	)
 	switch mode {
 	case v1alpha1.LocalSSDModeEphemeral:
-		envKeep, envDrop = kubeEnvKeyLocalSSDsEphemeral, kubeEnvKeyLocalSSDsExt
-		envLine = kubeEnvKeyLocalSSDsEphemeral + ": true"
-		labelKeep, labelDrop = kubeLabelKeyEphemeralLS, kubeLabelKeyLocalNVMe
+		envKey, envValue = kubeEnvKeyLocalSSDsEphemeral, "true"
+		envDrop = kubeEnvKeyLocalSSDsExt
+		labelKey, labelDrop = kubeLabelKeyEphemeralLS, kubeLabelKeyLocalNVMe
 	default:
 		// RawBlock is the default; treat empty string as RawBlock so a
 		// NodeClass that omits the field still gets sensible kube-env.
-		envKeep, envDrop = kubeEnvKeyLocalSSDsExt, kubeEnvKeyLocalSSDsEphemeral
-		envLine = fmt.Sprintf("%s: %d,nvme,block", kubeEnvKeyLocalSSDsExt, count)
-		labelKeep, labelDrop = kubeLabelKeyLocalNVMe, kubeLabelKeyEphemeralLS
+		envKey, envValue = kubeEnvKeyLocalSSDsExt, fmt.Sprintf("%d,nvme,block", count)
+		envDrop = kubeEnvKeyLocalSSDsEphemeral
+		labelKey, labelDrop = kubeLabelKeyLocalNVMe, kubeLabelKeyEphemeralLS
 	}
 
 	var sawEnv, sawLabels bool
@@ -79,10 +79,16 @@ func PatchLocalSSDMetadata(items []*compute.MetadataItems, mode v1alpha1.LocalSS
 		switch it.Key {
 		case "kube-env":
 			sawEnv = true
-			it.Value = lo.ToPtr(upsertKubeEnvLine(lo.FromPtr(it.Value), envKeep, envDrop, envLine))
+			v := lo.FromPtr(it.Value)
+			v = removeKubeEnvKey(v, envDrop)
+			v = setKubeEnvKey(v, envKey, envValue)
+			it.Value = lo.ToPtr(v)
 		case "kube-labels":
 			sawLabels = true
-			it.Value = lo.ToPtr(upsertKubeLabel(lo.FromPtr(it.Value), labelKeep, labelDrop))
+			v := lo.FromPtr(it.Value)
+			v = removeKubeLabel(v, labelDrop)
+			v = setKubeLabel(v, labelKey, "true")
+			it.Value = lo.ToPtr(v)
 		}
 	}
 	if !sawEnv {
@@ -94,68 +100,96 @@ func PatchLocalSSDMetadata(items []*compute.MetadataItems, mode v1alpha1.LocalSS
 	return items, nil
 }
 
-// upsertKubeEnvLine drops any line starting with "<dropKey>:" and replaces
-// (or appends) the line starting with "<keepKey>:" with newLine.
-func upsertKubeEnvLine(kubeEnv, keepKey, dropKey, newLine string) string {
-	keepPrefix := keepKey + ":"
-	dropPrefix := dropKey + ":"
-	// Canonical kube-env ends with "\n"; strip it before Split so the trailing
-	// empty element doesn't slot in front of an appended newLine.
-	trimmed := strings.TrimRight(kubeEnv, "\n")
+// setKubeEnvKey replaces any "key: ..." line in env with "key: value", or
+// appends "key: value" if no such line exists. Preserves line order and the
+// canonical trailing newline.
+func setKubeEnvKey(env, key, value string) string {
+	prefix := key + ":"
+	newLine := key + ": " + value
+	trimmed := strings.TrimRight(env, "\n")
 	lines := strings.Split(trimmed, "\n")
 	out := make([]string, 0, len(lines)+1)
 	replaced := false
 	for _, line := range lines {
-		switch {
-		case strings.HasPrefix(line, dropPrefix):
-			// drop stale opposite-mode line
-		case strings.HasPrefix(line, keepPrefix):
+		if strings.HasPrefix(line, prefix) {
 			if !replaced {
 				out = append(out, newLine)
 				replaced = true
 			}
-			// extra duplicates (shouldn't happen) collapse to one
-		default:
-			out = append(out, line)
+			continue
 		}
+		out = append(out, line)
 	}
 	if !replaced {
 		out = append(out, newLine)
 	}
-	result := strings.Join(out, "\n")
-	if strings.HasSuffix(kubeEnv, "\n") {
+	return joinWithTrailingNewline(out, env)
+}
+
+// removeKubeEnvKey drops any "key: ..." line from env. No-op if absent.
+// Preserves the canonical trailing newline.
+func removeKubeEnvKey(env, key string) string {
+	prefix := key + ":"
+	trimmed := strings.TrimRight(env, "\n")
+	lines := strings.Split(trimmed, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.HasPrefix(line, prefix) {
+			continue
+		}
+		out = append(out, line)
+	}
+	return joinWithTrailingNewline(out, env)
+}
+
+func joinWithTrailingNewline(lines []string, original string) string {
+	result := strings.Join(lines, "\n")
+	if strings.HasSuffix(original, "\n") {
 		result += "\n"
 	}
 	return result
 }
 
-// upsertKubeLabel removes any "<dropKey>=..." pair from a comma-separated
-// label string and ensures "<keepKey>=true" appears exactly once.
-func upsertKubeLabel(kubeLabels, keepKey, dropKey string) string {
-	parts := strings.Split(kubeLabels, ",")
+// setKubeLabel ensures "key=value" appears exactly once in labels, replacing
+// any existing "key=..." pair. Labels are comma-separated.
+func setKubeLabel(labels, key, value string) string {
+	parts := strings.Split(labels, ",")
 	out := make([]string, 0, len(parts)+1)
-	keepFound := false
+	replaced := false
 	for _, raw := range parts {
 		pair := strings.TrimSpace(raw)
 		if pair == "" {
 			continue
 		}
 		k, _, _ := strings.Cut(pair, "=")
-		switch k {
-		case dropKey:
-			// drop
-		case keepKey:
-			if keepFound {
-				continue
+		if k == key {
+			if !replaced {
+				out = append(out, key+"="+value)
+				replaced = true
 			}
-			keepFound = true
-			out = append(out, keepKey+"=true")
-		default:
-			out = append(out, pair)
+			continue
 		}
+		out = append(out, pair)
 	}
-	if !keepFound {
-		out = append(out, keepKey+"=true")
+	if !replaced {
+		out = append(out, key+"="+value)
+	}
+	return strings.Join(out, ",")
+}
+
+// removeKubeLabel drops any "key=..." pair from labels. No-op if absent.
+func removeKubeLabel(labels, key string) string {
+	parts := strings.Split(labels, ",")
+	out := make([]string, 0, len(parts))
+	for _, raw := range parts {
+		pair := strings.TrimSpace(raw)
+		if pair == "" {
+			continue
+		}
+		if k, _, _ := strings.Cut(pair, "="); k == key {
+			continue
+		}
+		out = append(out, pair)
 	}
 	return strings.Join(out, ",")
 }

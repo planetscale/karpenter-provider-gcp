@@ -51,7 +51,7 @@ func NewInstanceType(ctx context.Context, mt *computepb.MachineType, nodeClass *
 	// ResolveReservedResource uses its boot-disk branch (option1/option2/100 GiB
 	// minimum) instead of the SSD-mode (50/75/100 GiB by count) branch.
 	effectiveSSDGiB, effectiveSSDCount := totalSSDGiB, localSSDCount
-	if nodeClass == nil || nodeClass.Spec.LocalSsdMode != v1alpha1.LocalSSDModeEphemeral {
+	if nodeClass.Spec.LocalSsdMode != v1alpha1.LocalSSDModeEphemeral {
 		effectiveSSDGiB, effectiveSSDCount = 0, 0
 	}
 

@@ -372,6 +372,7 @@ func (p *DefaultProvider) tryCreateInstance(ctx context.Context, nodeClass *v1al
 	// predicate) because a conflict between user config and a name-recognised
 	// bundled family is always a config bug, not a cache state issue.
 	if err := evaluateLocalSSDConflict(nodeClass, instanceType.Name, mt); err != nil {
+		log.FromContext(ctx).Error(err, "local-SSD conflict; skipping candidate", "instanceType", instanceType.Name)
 		return nil, "", nil, &retryableError{err}
 	}
 
@@ -659,13 +660,11 @@ func (p *DefaultProvider) renderDiskProperties(instanceType *cloudprovider.Insta
 		return disks[i].Boot
 	})
 
-	useTopLevelSSD := nodeClass.Spec.LocalSsdCount > 0
+	skipLegacySSDEntries := nodeClass.Spec.LocalSsdCount > 0
 	attachedDisks := make([]*compute.AttachedDisk, 0, len(disks)+int(nodeClass.Spec.LocalSsdCount))
 	for _, disk := range disks {
 		if disk.Category == "local-ssd" {
-			if useTopLevelSSD {
-				// Top-level LocalSsdCount wins; ignore legacy local-ssd disk entries
-				// so they aren't double-counted.
+			if skipLegacySSDEntries {
 				continue
 			}
 			attachedDisks = append(attachedDisks, p.scratchDisk(zone))
@@ -1008,16 +1007,14 @@ func warnLegacyLocalSSDDisks(ctx context.Context, nodeClass *v1alpha1.GCENodeCla
 		if d.Category != "local-ssd" {
 			continue
 		}
+		fields := []any{"nodeClass", nodeClass.Name, "diskIndex", i}
+		if d.SizeGiB > 0 {
+			fields = append(fields, "sizeGiB", d.SizeGiB, "sizeGiBIgnored", true)
+		}
 		log.FromContext(ctx).Info(
 			"spec.disks[].category=local-ssd is deprecated; set spec.localSsdCount instead",
-			"nodeClass", nodeClass.Name, "diskIndex", i,
+			fields...,
 		)
-		if d.SizeGiB > 0 {
-			log.FromContext(ctx).Info(
-				"spec.disks[].sizeGiB is ignored for category=local-ssd; size is fixed by the machine family",
-				"nodeClass", nodeClass.Name, "diskIndex", i, "sizeGiB", d.SizeGiB,
-			)
-		}
 	}
 }
 
@@ -1092,13 +1089,13 @@ func (p *DefaultProvider) configureInstanceCapacityProvision(instance *compute.I
 	}
 }
 
-// z3HighSsdTiBThreshold is the bundled-local-SSD capacity above which a z3
+// z3HighSsdGiBThreshold is the bundled-local-SSD capacity above which a z3
 // non-metal SKU must use TERMINATE per GCE rules. Per GCP docs
 // (https://cloud.google.com/compute/docs/instances/setting-vm-host-options),
 // TERMINATE is the only supported maintenance policy for z3 instances with
 // more than 18 TiB of attached Titanium SSD. Below the threshold, z3
 // non-metal requires MIGRATE.
-const z3HighSsdTiBThreshold = 18
+const z3HighSsdGiBThreshold = 18 * 1024
 
 // onHostMaintenancePolicy returns the GCE Scheduling.OnHostMaintenance value
 // required by the (instanceType, capacityType, machineType) tuple, or "" to
@@ -1135,7 +1132,7 @@ func onHostMaintenancePolicy(instanceType *cloudprovider.InstanceType, capacityT
 	if strings.HasPrefix(instanceType.Name, "z3-") && !strings.HasSuffix(instanceType.Name, "-metal") {
 		if mt != nil {
 			if bls := mt.GetBundledLocalSsds(); bls != nil && bls.PartitionCount != nil {
-				if localssd.TotalGiB(instanceType.Name, int(*bls.PartitionCount)) > z3HighSsdTiBThreshold*1024 {
+				if localssd.TotalGiB(instanceType.Name, int(*bls.PartitionCount)) > z3HighSsdGiBThreshold {
 					return "TERMINATE"
 				}
 			}
