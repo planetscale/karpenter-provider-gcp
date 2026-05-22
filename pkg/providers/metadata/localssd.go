@@ -26,7 +26,7 @@ import (
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/apis/v1alpha1"
 )
 
-// Keys patched by PatchLocalSSDMetadata. Centralised so tests and the helper
+// Keys patched by PatchLocalSSDMetadata. Centralized so tests and the helper
 // stay in sync.
 const (
 	// kube-env (YAML scalar) keys

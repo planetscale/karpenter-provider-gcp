@@ -60,3 +60,117 @@ func TestTotalGiB(t *testing.T) {
 		})
 	}
 }
+
+func TestFamilySupportsConfigurableLocalSSDs(t *testing.T) {
+	tests := []struct {
+		machineName string
+		want        bool
+	}{
+		{"n1-standard-8", true},
+		{"n2-standard-8", true},
+		{"n2d-standard-8", true},
+		{"c2-standard-8", true},
+		{"c2d-standard-8", true},
+
+		// Bundled-SSD SKUs: count comes from BundledLocalSsds, not from caller.
+		{"c4d-standard-8-lssd", false},
+		{"c4-standard-8-lssd", false},
+		{"c4a-standard-4-lssd", false},
+		{"z3-highmem-22-standardlssd", false},
+		{"a3-highgpu-8g", false},
+
+		// No-SSD-only families.
+		{"e2-standard-2", false},
+		{"t2a-standard-1", false},
+
+		// Prefix-collision guard: name must start with "<family>-", not just
+		// the family letter. "n2asomething" is not n2.
+		{"n2asomething", false},
+		{"", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.machineName, func(t *testing.T) {
+			got := FamilySupportsConfigurableLocalSSDs(tt.machineName)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestAllowedLocalSSDCounts pins the per-family-per-vCPU allowed-count table
+// used to drive per-count InstanceType variant emission. Source data verified
+// 2026-05 against GCE general-purpose-machines and compute-optimized-machines
+// docs.
+func TestAllowedLocalSSDCounts(t *testing.T) {
+	tests := []struct {
+		name        string
+		machineName string
+		vCPUs       int32
+		want        []int
+	}{
+		// n1: same table across all vCPU sizes, including 1-vCPU.
+		{"n1-standard-1", "n1-standard-1", 1, []int{1, 2, 3, 4, 5, 6, 7, 8, 16, 24}},
+		{"n1-standard-8", "n1-standard-8", 8, []int{1, 2, 3, 4, 5, 6, 7, 8, 16, 24}},
+		{"n1-highmem-96", "n1-highmem-96", 96, []int{1, 2, 3, 4, 5, 6, 7, 8, 16, 24}},
+
+		// n2 brackets.
+		{"n2-standard-2 (lowest bracket)", "n2-standard-2", 2, []int{1, 2, 4, 8, 16, 24}},
+		{"n2-standard-8", "n2-standard-8", 8, []int{1, 2, 4, 8, 16, 24}},
+		{"n2-standard-16 (min jumps to 2)", "n2-standard-16", 16, []int{2, 4, 8, 16, 24}},
+		{"n2-standard-32", "n2-standard-32", 32, []int{4, 8, 16, 24}},
+		{"n2-standard-48", "n2-standard-48", 48, []int{8, 16, 24}},
+		{"n2-standard-80", "n2-standard-80", 80, []int{8, 16, 24}},
+		{"n2-standard-96 (top bracket)", "n2-standard-96", 96, []int{16, 24}},
+		{"n2-standard-128", "n2-standard-128", 128, []int{16, 24}},
+
+		// N2 bracket-interior vCPU values (no predefined SKUs at these counts,
+		// but the doc rule covers them — verifies we match the published
+		// bracket boundaries, not just the predefined SKU vCPUs).
+		{"n2 hypothetical 10-vCPU (top of lowest bracket)", "n2-foo-10", 10, []int{1, 2, 4, 8, 16, 24}},
+		{"n2 hypothetical 22-vCPU (start of 22–40 bracket)", "n2-foo-22", 22, []int{4, 8, 16, 24}},
+		{"n2 hypothetical 42-vCPU (start of 42–80 bracket)", "n2-foo-42", 42, []int{8, 16, 24}},
+		{"n2 hypothetical 82-vCPU (start of top bracket)", "n2-foo-82", 82, []int{16, 24}},
+
+		// n2d brackets differ from n2 at 16 vCPUs (n2d still allows min=1).
+		{"n2d-standard-2", "n2d-standard-2", 2, []int{1, 2, 4, 8, 16, 24}},
+		{"n2d-standard-16 (still min=1)", "n2d-standard-16", 16, []int{1, 2, 4, 8, 16, 24}},
+		{"n2d-standard-32", "n2d-standard-32", 32, []int{2, 4, 8, 16, 24}},
+		{"n2d-standard-48", "n2d-standard-48", 48, []int{2, 4, 8, 16, 24}},
+		{"n2d-standard-64", "n2d-standard-64", 64, []int{4, 8, 16, 24}},
+		{"n2d-standard-80", "n2d-standard-80", 80, []int{4, 8, 16, 24}},
+		{"n2d-standard-96", "n2d-standard-96", 96, []int{8, 16, 24}},
+		{"n2d-standard-224", "n2d-standard-224", 224, []int{8, 16, 24}},
+
+		// c2 caps at 8 (not 24).
+		{"c2-standard-4 (lowest)", "c2-standard-4", 4, []int{1, 2, 4, 8}},
+		{"c2-standard-8", "c2-standard-8", 8, []int{1, 2, 4, 8}},
+		{"c2-standard-16", "c2-standard-16", 16, []int{2, 4, 8}},
+		{"c2-standard-30", "c2-standard-30", 30, []int{4, 8}},
+		{"c2-standard-60", "c2-standard-60", 60, []int{8}},
+
+		// c2d caps at 8.
+		{"c2d-standard-2", "c2d-standard-2", 2, []int{1, 2, 4, 8}},
+		{"c2d-standard-16", "c2d-standard-16", 16, []int{1, 2, 4, 8}},
+		{"c2d-standard-32", "c2d-standard-32", 32, []int{2, 4, 8}},
+		{"c2d-standard-56", "c2d-standard-56", 56, []int{4, 8}},
+		{"c2d-standard-112", "c2d-standard-112", 112, []int{8}},
+
+		// highcpu / highmem subfamilies follow the same per-vCPU rules.
+		{"n2-highcpu-32 same as n2-standard-32", "n2-highcpu-32", 32, []int{4, 8, 16, 24}},
+		{"n2d-highmem-16 same as n2d-standard-16", "n2d-highmem-16", 16, []int{1, 2, 4, 8, 16, 24}},
+		{"c2d-highmem-56 same as c2d-standard-56", "c2d-highmem-56", 56, []int{4, 8}},
+
+		// Out-of-family or below-minimum returns nil.
+		{"non-configurable family (e2)", "e2-standard-2", 2, nil},
+		{"bundled SKU (c4d-lssd)", "c4d-highmem-8-lssd", 8, nil},
+		{"zero vCPUs on configurable", "n2-standard-8", 0, nil},
+		{"empty name", "", 8, nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := AllowedLocalSSDCounts(tt.machineName, tt.vCPUs)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}

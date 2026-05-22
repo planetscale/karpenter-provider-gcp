@@ -17,27 +17,24 @@ limitations under the License.
 package instance
 
 import (
+	"errors"
 	"testing"
 
 	"cloud.google.com/go/compute/apiv1/computepb"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/karpenter/pkg/cloudprovider"
+	"sigs.k8s.io/karpenter/pkg/scheduling"
 
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/apis/v1alpha1"
 )
 
 // TestResolveLocalSSDCount pins the precedence used to advertise the local-SSD
-// count to the GKE bootstrapper via kube-env. This precedence is intentionally
-// inverted relative to instancetype.calculateDiskConfigGiB (which runs before
-// the conflict check and therefore prefers user config). Locking the order
-// here protects the kube-env writer against a future refactor that weakens
-// evaluateLocalSSDConflict and lets a bundled+user-count combination through.
-//
-// Order: BundledLocalSsds (cache hit) > spec.LocalSsdCount > legacy disk
-// entries. Cache miss for a name that the suffix predicate says bundles SSDs
-// must return an error rather than a silent zero (#3 invariant) — the caller
-// in tryCreateInstance wraps that error in &retryableError{}.
+// count to the GKE bootstrapper via kube-env. Cases cover the post-refactor
+// signature where the NodeClaim's scheduling.Requirements is the primary input
+// (replacing the legacy spec.LocalSsdCount path).
 func TestResolveLocalSSDCount(t *testing.T) {
 	bundled := func(count int32) *computepb.MachineType {
 		return &computepb.MachineType{
@@ -46,85 +43,112 @@ func TestResolveLocalSSDCount(t *testing.T) {
 	}
 	nonBundled := &computepb.MachineType{}
 
+	countReq := func(op corev1.NodeSelectorOperator, values ...string) scheduling.Requirements {
+		return scheduling.NewRequirements(
+			scheduling.NewRequirement(v1alpha1.LabelInstanceLocalSsdCount, op, values...),
+		)
+	}
+
 	cases := []struct {
 		name             string
-		mt               *computepb.MachineType
+		reqs             scheduling.Requirements
 		nc               *v1alpha1.GCENodeClass
+		mt               *computepb.MachineType
 		instanceTypeName string
 		want             int
-		wantErr          bool
+		// One of these is non-empty when an error is expected:
+		wantCreateReason string // expect *cloudprovider.CreateError with this ConditionReason
+		wantRetryable    bool   // expect a non-CreateError (caller wraps as retryable)
 	}{
 		{
-			name:             "bundled cache hit wins over user count",
-			mt:               bundled(2),
-			nc:               &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 7}},
-			instanceTypeName: "c4d-standard-8-lssd",
-			want:             2,
-		},
-		{
-			name:             "bundled cache hit wins over legacy disks",
-			mt:               bundled(12),
-			nc:               &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{Disks: []v1alpha1.Disk{{Category: "local-ssd"}, {Category: "local-ssd"}}}},
-			instanceTypeName: "z3-highmem-22-standardlssd",
-			want:             12,
-		},
-		{
-			name:             "non-bundled cache hit + user count → user count",
+			name:             "count In:[\"4\"] on configurable IT → 4",
+			reqs:             countReq(corev1.NodeSelectorOpIn, "4"),
+			nc:               &v1alpha1.GCENodeClass{},
 			mt:               nonBundled,
-			nc:               &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 4}},
 			instanceTypeName: "n2d-standard-8",
 			want:             4,
 		},
 		{
-			name: "non-bundled cache hit + legacy disks → legacy count",
-			mt:   nonBundled,
-			nc: &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{Disks: []v1alpha1.Disk{
-				{Category: "local-ssd"},
-				{Category: "local-ssd"},
-				{Category: "local-ssd"},
-			}}},
-			instanceTypeName: "n2-standard-8",
-			want:             3,
+			name:             "count In:[\"4\"] on bundled IT → bundled count (2) wins",
+			reqs:             countReq(corev1.NodeSelectorOpIn, "4"),
+			nc:               &v1alpha1.GCENodeClass{},
+			mt:               bundled(2),
+			instanceTypeName: "z3-highmem-22-standardlssd",
+			want:             2,
 		},
 		{
-			name:             "non-bundled + no SSD config → 0",
-			mt:               nonBundled,
+			name:             "count Gt:0 → UnsupportedLocalSSDCountOperator CreateError",
+			reqs:             countReq(corev1.NodeSelectorOpGt, "0"),
 			nc:               &v1alpha1.GCENodeClass{},
+			mt:               nonBundled,
+			instanceTypeName: "n2d-standard-8",
+			wantCreateReason: reasonUnsupportedLocalSSDCountOperator,
+		},
+		{
+			name:             "count In:[\"2\",\"4\"] → MultiValuedLocalSSDCount CreateError",
+			reqs:             countReq(corev1.NodeSelectorOpIn, "2", "4"),
+			nc:               &v1alpha1.GCENodeClass{},
+			mt:               nonBundled,
+			instanceTypeName: "n2d-standard-8",
+			wantCreateReason: reasonMultiValuedLocalSSDCount,
+		},
+		{
+			name:             "no count req + configurable IT → 0",
+			reqs:             scheduling.NewRequirements(),
+			nc:               &v1alpha1.GCENodeClass{},
+			mt:               nonBundled,
 			instanceTypeName: "n2d-standard-8",
 			want:             0,
 		},
 		{
-			name:             "user count wins over legacy when both set",
-			mt:               nonBundled,
-			nc:               &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 2, Disks: []v1alpha1.Disk{{Category: "local-ssd"}, {Category: "local-ssd"}, {Category: "local-ssd"}}}},
-			instanceTypeName: "n2d-standard-8",
+			name:             "no count req + bundled IT → bundled count",
+			reqs:             scheduling.NewRequirements(),
+			nc:               &v1alpha1.GCENodeClass{},
+			mt:               bundled(2),
+			instanceTypeName: "z3-highmem-22-standardlssd",
 			want:             2,
 		},
 		{
-			name:             "cache miss + bundled suffix → error (#3 invariant)",
+			name:             "cache miss + bundled name (mt nil) → retryable error",
+			reqs:             scheduling.NewRequirements(),
+			nc:               &v1alpha1.GCENodeClass{},
 			mt:               nil,
-			nc:               &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 1}},
 			instanceTypeName: "c4d-standard-8-lssd",
-			wantErr:          true,
+			wantRetryable:    true,
 		},
+		// Transitional fallback: legacy disks[].category=local-ssd. Kept so
+		// existing NodeClasses continue to provision while disks[] is retired.
+		// Phase 4 may delete this branch.
 		{
-			name:             "cache miss + non-bundled name → user count",
-			mt:               nil,
-			nc:               &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 4}},
-			instanceTypeName: "n2d-standard-8",
-			want:             4,
+			name: "no count req + legacy disks[] → counted from disks[]",
+			reqs: scheduling.NewRequirements(),
+			nc: &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{Disks: []v1alpha1.Disk{
+				{Category: "local-ssd"},
+				{Category: "local-ssd"},
+			}}},
+			mt:               nonBundled,
+			instanceTypeName: "n2-standard-8",
+			want:             2,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := resolveLocalSSDCount(tc.nc, tc.instanceTypeName, tc.mt)
-			if tc.wantErr {
+			got, err := resolveLocalSSDCount(tc.reqs, tc.nc, tc.instanceTypeName, tc.mt)
+			switch {
+			case tc.wantCreateReason != "":
 				require.Error(t, err)
-				return
+				var ce *cloudprovider.CreateError
+				require.ErrorAs(t, err, &ce, "expected *cloudprovider.CreateError, got %T", err)
+				assert.Equal(t, tc.wantCreateReason, ce.ConditionReason)
+			case tc.wantRetryable:
+				require.Error(t, err)
+				var ce *cloudprovider.CreateError
+				assert.False(t, errors.As(err, &ce), "expected non-CreateError (retryable), got CreateError")
+			default:
+				require.NoError(t, err)
+				assert.Equal(t, tc.want, got)
 			}
-			require.NoError(t, err)
-			assert.Equal(t, tc.want, got)
 		})
 	}
 }

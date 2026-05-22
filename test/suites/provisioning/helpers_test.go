@@ -18,6 +18,7 @@ package provisioning_test
 
 import (
 	"context"
+	"strconv"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -61,18 +62,21 @@ func runProvisioningTest(ctx context.Context, tc environment.TestCase) {
 	if imageFamily == "" {
 		imageFamily = gcpv1alpha1.ImageFamilyContainerOptimizedOS
 	}
-	switch {
-	case tc.LocalSSDMode != "":
-		env.CreateNodeClassForLocalSSD(ctx, name, imageFamily, tc.BootDiskCategory, tc.LocalSSDMode, int32(tc.LocalSSDCount))
-	case tc.LocalSSDCount > 0:
-		env.CreateNodeClassWithLocalSSDs(ctx, name, imageFamily, tc.LocalSSDCount)
-	default:
+	if tc.LocalSSDMode != "" {
+		env.CreateNodeClassForLocalSSD(ctx, name, imageFamily, tc.BootDiskCategory, tc.LocalSSDMode)
+	} else {
 		env.CreateNodeClass(ctx, name, imageFamily)
 	}
 	env.WaitForNodeClassReady(ctx, name)
 	env.CreateNodePool(ctx, name, name, tc)
 	env.WaitForNodePoolReady(ctx, name)
-	env.CreateDeployment(ctx, name, name, name, tc.Arch)
+	deployOpts := environment.DeploymentOptions{}
+	if tc.PodLocalSSDCount != "" {
+		deployOpts.ExtraNodeSelectors = map[string]string{
+			gcpv1alpha1.LabelInstanceLocalSsdCount: tc.PodLocalSSDCount,
+		}
+	}
+	env.CreateDeploymentWithOptions(ctx, name, name, name, tc.Arch, deployOpts)
 
 	env.WaitForNodeClaimLaunched(ctx, name)
 	pod := env.WaitForRunningPod(ctx, name)
@@ -92,22 +96,19 @@ func runProvisioningTest(ctx context.Context, tc environment.TestCase) {
 	Expect(tc.Families).To(ContainElement(node.Labels[gcpv1alpha1.LabelInstanceFamily]))
 	Expect(tc.InstanceTypes).To(ContainElement(node.Labels[corev1.LabelInstanceTypeStable]))
 
-	expectedScratch := tc.ExpectedScratchDisks
-	if expectedScratch == 0 {
-		expectedScratch = tc.LocalSSDCount
-	}
-	if expectedScratch > 0 {
-		inst, err := env.GetGCEInstance(ctx, node.Spec.ProviderID)
-		Expect(err).NotTo(HaveOccurred(), "fetching GCE instance for %s", node.Name)
-		var scratch int
-		for _, d := range inst.Disks {
-			if d.Type == "SCRATCH" && d.Interface == "NVME" {
-				scratch++
-			}
+	expectedScratch := expectedScratchDiskCount(tc)
+	inst, err := env.GetGCEInstance(ctx, node.Spec.ProviderID)
+	Expect(err).NotTo(HaveOccurred(), "fetching GCE instance for %s", node.Name)
+	var scratch int
+	for _, d := range inst.Disks {
+		if d.Type == "SCRATCH" && d.Interface == "NVME" {
+			scratch++
 		}
-		Expect(scratch).To(Equal(expectedScratch),
-			"expected %d local SSDs on %s, got %d", expectedScratch, node.Name, scratch)
+	}
+	Expect(scratch).To(Equal(expectedScratch),
+		"expected %d local SSDs on %s, got %d", expectedScratch, node.Name, scratch)
 
+	if expectedScratch > 0 {
 		// GKE-applied SSD labels (`cloud.google.com/gke-local-nvme-ssd`,
 		// `cloud.google.com/gke-ephemeral-storage-local-ssd`) are written by
 		// the bootstrapper and can land after the workload pod reaches Running,
@@ -121,8 +122,51 @@ func runProvisioningTest(ctx context.Context, tc environment.TestCase) {
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(n.Labels[labelKey]).To(Equal("true"),
 				"expected %s=true node label", labelKey)
-		}).WithTimeout(2*time.Minute).WithPolling(5*time.Second).Should(Succeed())
+		}).WithTimeout(2 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
 	}
 
+	expectedCountLabel := expectedSSDCountLabelValue(tc)
+	Eventually(func(g Gomega) {
+		n, err := env.KubeClient.CoreV1().Nodes().Get(ctx, provisionedNodeName, metav1.GetOptions{})
+		g.Expect(err).NotTo(HaveOccurred())
+		got := n.Labels[gcpv1alpha1.LabelInstanceLocalSsdCount]
+		g.Expect(got).To(Equal(expectedCountLabel),
+			"node %s: %s = %q, want %q",
+			provisionedNodeName, gcpv1alpha1.LabelInstanceLocalSsdCount, got, expectedCountLabel)
+	}).WithTimeout(2 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
+
 	env.WaitForKubeProxyRunning(ctx, provisionedNodeName)
+}
+
+// expectedSSDCountLabelValue derives the expected value of the
+// karpenter.k8s.gcp/instance-local-ssd-count label on the provisioned node.
+// Variant emission writes the label for every count, including 0, so a
+// no-SSD node carries "0" rather than an absent label.
+func expectedSSDCountLabelValue(tc environment.TestCase) string {
+	switch {
+	case tc.PodLocalSSDCount != "":
+		return tc.PodLocalSSDCount
+	case tc.ExpectedScratchDisks > 0:
+		return strconv.Itoa(tc.ExpectedScratchDisks)
+	default:
+		return "0"
+	}
+}
+
+// expectedScratchDiskCount derives the expected number of SCRATCH NVMe disks
+// attached to the provisioned GCE instance. Returns 0 when no SSDs are
+// expected (also a valid assertion target — we always verify the disk count).
+func expectedScratchDiskCount(tc environment.TestCase) int {
+	switch {
+	case tc.ExpectedScratchDisks > 0:
+		return tc.ExpectedScratchDisks
+	case tc.PodLocalSSDCount != "":
+		n, err := strconv.Atoi(tc.PodLocalSSDCount)
+		if err != nil || n < 0 {
+			return 0
+		}
+		return n
+	default:
+		return 0
+	}
 }

@@ -114,6 +114,8 @@ _Appears in:_
 | `shieldedInstanceConfig` _[ShieldedInstanceConfig](#shieldedinstanceconfig)_ | ShieldedInstanceConfig is the Shielded VM configuration for the instance. |  | Optional: \{\} <br /> |
 | `networkConfig` _[NetworkConfig](#networkconfig)_ | NetworkConfig allows overriding per-interface network settings for provisioned nodes. |  | Optional: \{\} <br /> |
 | `autoGPUTaint` _boolean_ | AutoGPUTaint, when true, automatically applies nvidia.com/gpu=present:NoSchedule<br />to any GPU node at provisioning time, regardless of the NodePool configuration.<br />Disabled by default to preserve backward compatibility. |  | Optional: \{\} <br /> |
+| `localSsdMode` _[LocalSSDMode](#localssdmode)_ | LocalSsdMode controls how local SSDs are exposed to workloads on machine<br />types that ship local SSDs (configurable families with a non-zero count<br />pinned at scheduling time, or bundled-SSD SKUs like -lssd / z3 / a3).<br />Defaults to RawBlock. | RawBlock | Enum: [RawBlock Ephemeral] <br />Optional: \{\} <br /> |
+| `localSsdCount` _integer_ | LocalSsdCount is retained for schema compatibility but is silently<br />ignored. Local-SSD count is now selected per pod via the well-known<br />karpenter.k8s.gcp/instance-local-ssd-count label (the scheduler emits<br />one InstanceType variant per allowed count for configurable families and<br />pins the count for bundled-SSD SKUs).<br />Deprecated: pin the count on the pod or NodePool via the<br />karpenter.k8s.gcp/instance-local-ssd-count label requirement instead. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 
 
 #### GCENodeClassStatus
@@ -197,6 +199,24 @@ _Appears in:_
 | `imageGCHighThresholdPercent` _integer_ | ImageGCHighThresholdPercent is the percent of disk usage after which image<br />garbage collection is always run. The percent is calculated by dividing this<br />field value by 100, so this field must be between 0 and 100, inclusive.<br />When specified, the value must be greater than ImageGCLowThresholdPercent. |  | Maximum: 100 <br />Minimum: 0 <br />Optional: \{\} <br /> |
 | `imageGCLowThresholdPercent` _integer_ | ImageGCLowThresholdPercent is the percent of disk usage before which image<br />garbage collection is never run. Lowest disk usage to garbage collect to.<br />The percent is calculated by dividing this field value by 100,<br />so the field value must be between 0 and 100, inclusive.<br />When specified, the value must be less than imageGCHighThresholdPercent |  | Maximum: 100 <br />Minimum: 0 <br />Optional: \{\} <br /> |
 | `cpuCFSQuota` _boolean_ | CPUCFSQuota enables CPU CFS quota enforcement for containers that specify CPU limits. |  | Optional: \{\} <br /> |
+
+
+#### LocalSSDMode
+
+_Underlying type:_ _string_
+
+LocalSSDMode controls how local SSDs are exposed to workloads.
+
+_Validation:_
+- Enum: [RawBlock Ephemeral]
+
+_Appears in:_
+- [GCENodeClassSpec](#gcenodeclassspec)
+
+| Field | Description |
+| --- | --- |
+| `RawBlock` |  |
+| `Ephemeral` |  |
 
 
 #### NetworkConfig

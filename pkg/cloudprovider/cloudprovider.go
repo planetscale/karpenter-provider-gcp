@@ -151,14 +151,46 @@ func (c *CloudProvider) resolveInstanceTypeFromInstance(ctx context.Context, ins
 		return nil, client.IgnoreNotFound(fmt.Errorf("getting instance types, %w", err))
 	}
 
-	instanceType, ok := lo.Find(instanceTypes, func(i *cloudprovider.InstanceType) bool {
-		return i.Name == instance.Type
-	})
-
+	instanceType, ok := matchVariantForInstance(instanceTypes, instance)
 	if !ok {
 		return nil, fmt.Errorf("instance type %s not found in offerings", instance.Type)
 	}
 	return instanceType, nil
+}
+
+// matchVariantForInstance picks the InstanceType whose Name matches the GCE
+// instance type AND whose karpenter.k8s.gcp/instance-local-ssd-count
+// requirement matches the SSD-count stamped on the instance at create time.
+// Configurable-SSD families emit multiple variants sharing one Name; without
+// this match, callers would always get the first variant (count=0), producing
+// a mislabelled NodeClaim during cloudprovider.List/Get reconciliation.
+//
+// Falls back to the first Name-match when the instance has no SSD-count label
+// (pre-refactor or externally-adopted instances): preserves the prior
+// behavior rather than refusing to resolve.
+func matchVariantForInstance(its []*cloudprovider.InstanceType, inst *instance.Instance) (*cloudprovider.InstanceType, bool) {
+	gceCountKey := utils.SanitizeGCELabelValue(v1alpha1.LabelInstanceLocalSsdCount)
+	wantCount, hasCount := inst.Labels[gceCountKey]
+	var first *cloudprovider.InstanceType
+	for _, i := range its {
+		if i.Name != inst.Type {
+			continue
+		}
+		if first == nil {
+			first = i
+		}
+		if !hasCount {
+			return i, true
+		}
+		req := i.Requirements.Get(v1alpha1.LabelInstanceLocalSsdCount)
+		if req.Operator() == corev1.NodeSelectorOpIn && req.Len() == 1 && req.Any() == wantCount {
+			return i, true
+		}
+	}
+	if first != nil {
+		return first, true
+	}
+	return nil, false
 }
 
 func (c *CloudProvider) resolveNodePoolFromInstance(ctx context.Context, instance *instance.Instance) (*karpv1.NodePool, error) {

@@ -69,7 +69,8 @@ func newTestProvider() *DefaultProvider {
 		authOptions:       &auth.Credential{Region: "us-central1"},
 		pricingProvider:   &fakePricingProvider{},
 		gkeProvider:       &fakeGKEProvider{},
-		instanceTypesInfo: []*computepb.MachineType{mt},
+		instanceTypesInfo:   []*computepb.MachineType{mt},
+		instanceTypesByName: map[string]*computepb.MachineType{"n2-standard-4": mt},
 		instanceTypesOfferings: map[string]sets.Set[string]{
 			"n2-standard-4": sets.New("us-central1-a"),
 		},

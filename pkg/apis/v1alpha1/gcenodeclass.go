@@ -94,17 +94,21 @@ type GCENodeClassSpec struct {
 	// Disabled by default to preserve backward compatibility.
 	// +optional
 	AutoGPUTaint bool `json:"autoGPUTaint,omitempty"`
-	// LocalSsdMode controls how local SSDs are exposed to workloads.
-	// Applies to local SSDs attached via LocalSsdCount AND to local SSDs
-	// bundled with the selected machine type (-lssd / -standardlssd / z3).
+	// LocalSsdMode controls how local SSDs are exposed to workloads on machine
+	// types that ship local SSDs (configurable families with a non-zero count
+	// pinned at scheduling time, or bundled-SSD SKUs like -lssd / z3 / a3).
 	// Defaults to RawBlock.
 	// +kubebuilder:default=RawBlock
 	// +optional
 	LocalSsdMode LocalSSDMode `json:"localSsdMode,omitempty"`
-	// LocalSsdCount is the number of local SSDs to attach. Only honored on
-	// machine families that don't bundle local SSDs (n2, n2d, c2, m1, …).
-	// For bundled-SSD machine families (-lssd / -standardlssd / z3), leave
-	// unset — count is derived from the machine type via BundledLocalSsds.
+	// LocalSsdCount is retained for schema compatibility but is silently
+	// ignored. Local-SSD count is now selected per pod via the well-known
+	// karpenter.k8s.gcp/instance-local-ssd-count label (the scheduler emits
+	// one InstanceType variant per allowed count for configurable families and
+	// pins the count for bundled-SSD SKUs).
+	//
+	// Deprecated: pin the count on the pod or NodePool via the
+	// karpenter.k8s.gcp/instance-local-ssd-count label requirement instead.
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	LocalSsdCount int32 `json:"localSsdCount,omitempty"`

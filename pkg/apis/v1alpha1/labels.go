@@ -43,6 +43,7 @@ func init() {
 		LabelInstanceGPUManufacturer,
 		LabelInstanceGPUCount,
 		LabelInstanceGPUMemory,
+		LabelInstanceLocalSsdCount,
 		LabelTopologyZoneID,
 		corev1.LabelWindowsBuild,
 		LabelGKEReadinessCalicoReady,
@@ -97,20 +98,25 @@ var (
 	LabelGKEReadinessNetdReady             = "cloud.google.com/gke-netd-ready"
 	LabelGKEReadinessNodeLocalDNSReady     = "addon.gke.io/node-local-dns-ds-ready"
 
-	LabelNodeClass                           = apis.Group + "/gcenodeclass"
-	LabelTopologyZoneID                      = "topology.k8s.gcp/zone-id"
-	LabelInstanceCategory                    = apis.Group + "/instance-category"
-	LabelInstanceFamily                      = apis.Group + "/instance-family"
-	LabelInstanceShape                       = apis.Group + "/instance-shape"
-	LabelInstanceGeneration                  = apis.Group + "/instance-generation"
-	LabelInstanceSize                        = apis.Group + "/instance-size"
-	LabelInstanceCPU                         = apis.Group + "/instance-cpu"
-	LabelInstanceCPUModel                    = apis.Group + "/instance-cpu-model"
-	LabelInstanceMemory                      = apis.Group + "/instance-memory"
-	LabelInstanceGPUName                     = apis.Group + "/instance-gpu-name"
-	LabelInstanceGPUManufacturer             = apis.Group + "/instance-gpu-manufacturer"
-	LabelInstanceGPUCount                    = apis.Group + "/instance-gpu-count"
-	LabelInstanceGPUMemory                   = apis.Group + "/instance-gpu-memory"
+	LabelNodeClass               = apis.Group + "/gcenodeclass"
+	LabelTopologyZoneID          = "topology.k8s.gcp/zone-id"
+	LabelInstanceCategory        = apis.Group + "/instance-category"
+	LabelInstanceFamily          = apis.Group + "/instance-family"
+	LabelInstanceShape           = apis.Group + "/instance-shape"
+	LabelInstanceGeneration      = apis.Group + "/instance-generation"
+	LabelInstanceSize            = apis.Group + "/instance-size"
+	LabelInstanceCPU             = apis.Group + "/instance-cpu"
+	LabelInstanceCPUModel        = apis.Group + "/instance-cpu-model"
+	LabelInstanceMemory          = apis.Group + "/instance-memory"
+	LabelInstanceGPUName         = apis.Group + "/instance-gpu-name"
+	LabelInstanceGPUManufacturer = apis.Group + "/instance-gpu-manufacturer"
+	LabelInstanceGPUCount        = apis.Group + "/instance-gpu-count"
+	LabelInstanceGPUMemory       = apis.Group + "/instance-gpu-memory"
+	// LabelInstanceLocalSsdCount is the count of local SSDs attached to the
+	// node. On bundled-SSD machine types the value reflects the machine
+	// type's fixed count; on configurable-SSD families it reflects the count
+	// the pod requested via the same label key in its nodeSelector.
+	LabelInstanceLocalSsdCount               = apis.Group + "/instance-local-ssd-count"
 	AnnotationGCENodeClassHash               = apis.Group + "/gcenodeclass-hash"
 	AnnotationClusterNameTaggedCompatability = apis.CompatibilityGroup + "/cluster-name-tagged"
 	AnnotationGCENodeClassHashVersion        = apis.Group + "/gcenodeclass-hash-version"

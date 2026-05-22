@@ -47,6 +47,7 @@ import (
 	pkgcache "github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/cache"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/gke"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/pricing"
+	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/utils/localssd"
 )
 
 const (
@@ -84,6 +85,7 @@ type DefaultProvider struct {
 
 	muInstanceTypesInfo    sync.RWMutex
 	instanceTypesInfo      []*computepb.MachineType
+	instanceTypesByName    map[string]*computepb.MachineType
 	instanceTypesOfferings map[string]sets.Set[string]
 	instanceTypesSeqNum    uint64
 	cm                     *pretty.ChangeMonitor
@@ -120,12 +122,7 @@ func (p *DefaultProvider) LivenessProbe(req *http.Request) error {
 func (p *DefaultProvider) GetMachineType(name string) *computepb.MachineType {
 	p.muInstanceTypesInfo.RLock()
 	defer p.muInstanceTypesInfo.RUnlock()
-	for _, mt := range p.instanceTypesInfo {
-		if aws.StringValue(mt.Name) == name {
-			return mt
-		}
-	}
-	return nil
+	return p.instanceTypesByName[name]
 }
 
 func (p *DefaultProvider) validateState() error {
@@ -152,9 +149,9 @@ func (p *DefaultProvider) List(ctx context.Context, nodeClass *v1alpha1.GCENodeC
 	zonesHash, _ := hashstructure.Hash(zones, hashstructure.FormatV2, &hashstructure.HashOptions{SlicesAsSets: true})
 	kcHash, _ := hashstructure.Hash(nodeClass.Spec.KubeletConfiguration, hashstructure.FormatV2, &hashstructure.HashOptions{SlicesAsSets: true})
 	disksHash, _ := hashstructure.Hash(nodeClass.Spec.Disks, hashstructure.FormatV2, &hashstructure.HashOptions{SlicesAsSets: true})
-	listKey := fmt.Sprintf("%d-%d-%d-%d-%d-%s-%d",
+	listKey := fmt.Sprintf("%d-%d-%d-%d-%d-%s",
 		p.instanceTypesSeqNum, p.unavailableOfferings.SeqNum, zonesHash, kcHash, disksHash,
-		nodeClass.Spec.LocalSsdMode, nodeClass.Spec.LocalSsdCount)
+		nodeClass.Spec.LocalSsdMode)
 	item, ok := p.instanceTypesCache.Get(listKey)
 	if ok && len(item.([]*cloudprovider.InstanceType)) > 0 {
 		return item.([]*cloudprovider.InstanceType), nil
@@ -168,17 +165,41 @@ func (p *DefaultProvider) List(ctx context.Context, nodeClass *v1alpha1.GCENodeC
 		}
 
 		zoneData := p.buildZoneData(instanceType, zones)
-		offerings := p.createOfferings(ctx, instanceType, zoneData)
-		if len(offerings) == 0 {
-			continue
+		for _, ssdCount := range ssdCountVariants(mt) {
+			offerings := p.createOfferings(ctx, instanceType, zoneData)
+			if len(offerings) == 0 {
+				continue
+			}
+			instanceTypes = append(instanceTypes,
+				NewInstanceType(ctx, mt, nodeClass, p.authOptions.Region, offerings, ssdCount))
 		}
-
-		addInstanceType := NewInstanceType(ctx, mt, nodeClass, p.authOptions.Region, offerings)
-		instanceTypes = append(instanceTypes, addInstanceType)
 	}
 	p.instanceTypesCache.SetDefault(listKey, instanceTypes)
 
 	return instanceTypes, nil
+}
+
+// ssdCountVariants returns the local-SSD counts to emit as separate
+// InstanceType variants for this machine type. Configurable families
+// (n1/n2/n2d/c2/c2d) get {0} ∪ AllowedLocalSSDCounts so the scheduler can
+// pick the smallest count that satisfies a pod's ephemeral-storage demand.
+// Bundled-SSD SKUs get a single variant pinned to the bundled count.
+// Everything else gets a single {0} variant.
+func ssdCountVariants(mt *computepb.MachineType) []int64 {
+	name := aws.StringValue(mt.Name)
+	if localssd.FamilySupportsConfigurableLocalSSDs(name) {
+		allowed := localssd.AllowedLocalSSDCounts(name, mt.GetGuestCpus())
+		out := make([]int64, 0, len(allowed)+1)
+		out = append(out, 0)
+		for _, c := range allowed {
+			out = append(out, int64(c))
+		}
+		return out
+	}
+	if bls := mt.GetBundledLocalSsds(); bls != nil && bls.PartitionCount != nil && *bls.PartitionCount > 0 {
+		return []int64{int64(*bls.PartitionCount)}
+	}
+	return []int64{0}
 }
 
 // buildZoneData checks zonal availability from cached offerings while keeping spot
@@ -285,6 +306,11 @@ func (p *DefaultProvider) UpdateInstanceTypes(ctx context.Context) error {
 		atomic.AddUint64(&p.instanceTypesSeqNum, 1)
 	}
 	p.instanceTypesInfo = types
+	byName := make(map[string]*computepb.MachineType, len(types))
+	for _, mt := range types {
+		byName[aws.StringValue(mt.Name)] = mt
+	}
+	p.instanceTypesByName = byName
 
 	return nil
 }

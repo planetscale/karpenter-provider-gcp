@@ -160,11 +160,15 @@ func TestHasLegacyLocalSSDDisk(t *testing.T) {
 	})
 }
 
-// TestEvaluateLocalSSDConflict asserts that when a bundled-SSD machine type is
-// paired with user-declared local SSDs (top-level or legacy), the conflict
-// helper returns a non-nil error. tryCreateInstance wraps this in
-// *retryableError so the Create loop tries a different instance type rather
-// than failing the NodeClaim outright.
+// TestEvaluateLocalSSDConflict asserts the conflict helper's contract after
+// LocalSsdCount soft-deprecation:
+//
+//   - Only legacy disks[].category=local-ssd entries paired with a bundled-SSD
+//     machine type trigger a conflict.
+//   - spec.localSsdCount is silently ignored — even on bundled SKUs.
+//
+// tryCreateInstance wraps any returned error in *retryableError so the Create
+// loop tries a different instance type rather than failing the NodeClaim.
 func TestEvaluateLocalSSDConflict(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -174,11 +178,11 @@ func TestEvaluateLocalSSDConflict(t *testing.T) {
 		wantConf bool
 	}{
 		{
-			name:     "bundled + top-level count → conflict",
+			name:     "bundled + LocalSsdCount=1 → no conflict (field ignored)",
 			nc:       &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 1}},
 			mtName:   "c4d-standard-8-lssd",
 			mt:       machineTypeWithBundledSSDs(2),
-			wantConf: true,
+			wantConf: false,
 		},
 		{
 			name: "bundled + legacy disk-entry → conflict",
@@ -187,13 +191,6 @@ func TestEvaluateLocalSSDConflict(t *testing.T) {
 			}},
 			mtName:   "z3-highmem-22-standardlssd",
 			mt:       machineTypeWithBundledSSDs(12),
-			wantConf: true,
-		},
-		{
-			name:     "bundled z3 highlssd + top-level count → conflict",
-			nc:       &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 1}},
-			mtName:   "z3-highmem-22-highlssd",
-			mt:       machineTypeWithBundledSSDs(24),
 			wantConf: true,
 		},
 		{
@@ -206,29 +203,28 @@ func TestEvaluateLocalSSDConflict(t *testing.T) {
 			wantConf: true,
 		},
 		{
-			name:     "accelerator a3-highgpu-8g + top-level count → conflict",
-			nc:       &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 1}},
+			name: "bundled accelerator + legacy disk-entry → conflict",
+			nc: &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{
+				Disks: []v1alpha1.Disk{{Category: "local-ssd"}},
+			}},
 			mtName:   "a3-highgpu-8g",
 			mt:       machineTypeWithBundledSSDs(16),
 			wantConf: true,
 		},
 		{
-			name:     "accelerator a3-ultragpu-8g-nolssd + top-level count → no conflict (API says not bundled)",
-			nc:       &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 2}},
-			mtName:   "a3-ultragpu-8g-nolssd",
-			mt:       machineTypeWithBundledSSDs(0),
-			wantConf: false,
-		},
-		{
-			name:     "accelerator + cache miss falls back to prefix → conflict",
-			nc:       &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 1}},
+			name: "accelerator + cache miss falls back to prefix → conflict on legacy disk-entry",
+			nc: &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{
+				Disks: []v1alpha1.Disk{{Category: "local-ssd"}},
+			}},
 			mtName:   "a4x-highgpu-4g",
 			mt:       nil,
 			wantConf: true,
 		},
 		{
-			name:     "-nolssd sibling + cache miss falls back to suffix exclusion → no conflict",
-			nc:       &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 1}},
+			name: "-nolssd sibling + cache miss + legacy disk-entry → no conflict (suffix exclusion)",
+			nc: &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{
+				Disks: []v1alpha1.Disk{{Category: "local-ssd"}},
+			}},
 			mtName:   "a3-ultragpu-8g-nolssd",
 			mt:       nil,
 			wantConf: false,
@@ -241,8 +237,10 @@ func TestEvaluateLocalSSDConflict(t *testing.T) {
 			wantConf: false,
 		},
 		{
-			name:     "non-bundled + top-level count → no conflict",
-			nc:       &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 2}},
+			name: "non-bundled + legacy disk-entry → no conflict",
+			nc: &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{
+				Disks: []v1alpha1.Disk{{Category: "local-ssd"}},
+			}},
 			mtName:   "n2d-standard-8",
 			mt:       machineTypeWithBundledSSDs(0),
 			wantConf: false,

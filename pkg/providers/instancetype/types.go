@@ -37,20 +37,24 @@ import (
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/utils/localssd"
 )
 
+// NewInstanceType builds a single InstanceType variant for the given machine
+// type and local-SSD count. Callers in instancetype.List emit one variant per
+// allowed count (0 plus AllowedLocalSSDCounts) for configurable families,
+// and a single variant pinned to the bundled count (or 0) for everything else.
 func NewInstanceType(ctx context.Context, mt *computepb.MachineType, nodeClass *v1alpha1.GCENodeClass,
-	region string, offerings cloudprovider.Offerings) *cloudprovider.InstanceType {
+	region string, offerings cloudprovider.Offerings, ssdCount int64) *cloudprovider.InstanceType {
 	if offerings == nil {
 		return nil
 	}
 
-	bootDiskGiB, totalSSDGiB, localSSDCount := calculateDiskConfigGiB(nodeClass, mt)
+	bootDiskGiB, totalSSDGiB := calculateDiskConfigGiB(nodeClass, mt, ssdCount)
 
 	// Only Ephemeral mode mounts local SSDs as the kubelet's ephemeral-storage
 	// filesystem; RawBlock leaves them as raw NVMe devices for the workload and
 	// ephemeral storage falls back to the boot disk. Zero out the SSD inputs so
 	// ResolveReservedResource uses its boot-disk branch (option1/option2/100 GiB
 	// minimum) instead of the SSD-mode (50/75/100 GiB by count) branch.
-	effectiveSSDGiB, effectiveSSDCount := totalSSDGiB, localSSDCount
+	effectiveSSDGiB, effectiveSSDCount := totalSSDGiB, ssdCount
 	if nodeClass.Spec.LocalSsdMode != v1alpha1.LocalSSDModeEphemeral {
 		effectiveSSDGiB, effectiveSSDCount = 0, 0
 	}
@@ -74,7 +78,7 @@ func NewInstanceType(ctx context.Context, mt *computepb.MachineType, nodeClass *
 		"instanceType", aws.StringValue(mt.Name),
 		"bootDiskGiB", bootDiskGiB,
 		"totalSSDGiB", totalSSDGiB,
-		"localSSDCount", localSSDCount,
+		"localSSDCount", ssdCount,
 		"effectiveSSDGiB", effectiveSSDGiB,
 		"effectiveSSDCount", effectiveSSDCount,
 		"ephemeralEviction", ephemeralEviction,
@@ -95,7 +99,7 @@ func NewInstanceType(ctx context.Context, mt *computepb.MachineType, nodeClass *
 
 	it := &cloudprovider.InstanceType{
 		Name:         aws.StringValue(mt.Name),
-		Requirements: computeRequirements(mt, offerings, region),
+		Requirements: computeRequirements(mt, offerings, region, ssdCount),
 		Offerings:    offerings,
 		Capacity:     computeCapacity(ctx, mt, nodeClass, totalStorageBytes),
 		Overhead:     &overhead,
@@ -115,7 +119,7 @@ func extractCategory(part string) string {
 }
 
 //nolint:gocyclo
-func computeRequirements(mt *computepb.MachineType, offerings cloudprovider.Offerings, region string) scheduling.Requirements {
+func computeRequirements(mt *computepb.MachineType, offerings cloudprovider.Offerings, region string, ssdCount int64) scheduling.Requirements {
 	requirements := scheduling.NewRequirements(
 		// Well Known Upstream
 		scheduling.NewRequirement(corev1.LabelInstanceTypeStable, corev1.NodeSelectorOpIn, aws.StringValue(mt.Name)),
@@ -146,6 +150,7 @@ func computeRequirements(mt *computepb.MachineType, offerings cloudprovider.Offe
 		scheduling.NewRequirement(v1alpha1.LabelInstanceGPUCount, corev1.NodeSelectorOpDoesNotExist),
 		scheduling.NewRequirement(v1alpha1.LabelInstanceGPUMemory, corev1.NodeSelectorOpDoesNotExist),
 	)
+	requirements.Add(localSSDCountRequirement(ssdCount))
 	// Only add zone-id label when available in offerings. It may not be available if a user has upgraded from a
 	// previous version of Karpenter w/o zone-id support and the nodeclass vswitch status has not yet updated.
 	if zoneIDs := lo.FilterMap(offerings.Available(), func(o *cloudprovider.Offering, _ int) (string, bool) {
@@ -181,6 +186,19 @@ func computeRequirements(mt *computepb.MachineType, offerings cloudprovider.Offe
 	}
 
 	return requirements
+}
+
+// localSSDCountRequirement emits the karpenter.k8s.gcp/instance-local-ssd-count
+// requirement pinned to the supplied count. instancetype.List picks the count
+// per variant: bundled SKUs get the bundled value; configurable families get
+// one variant per entry in {0} ∪ AllowedLocalSSDCounts; no-SSD-only families
+// get 0.
+func localSSDCountRequirement(ssdCount int64) *scheduling.Requirement {
+	return scheduling.NewRequirement(
+		v1alpha1.LabelInstanceLocalSsdCount,
+		corev1.NodeSelectorOpIn,
+		fmt.Sprintf("%d", ssdCount),
+	)
 }
 
 func extractGPUName(mt *computepb.MachineType) string {
@@ -230,30 +248,11 @@ func memory(ctx context.Context, mt *computepb.MachineType) *resource.Quantity {
 	return resource.NewQuantity(totalQuantity-int64(float64(totalQuantity)*osReservedPercent), resource.DecimalSI)
 }
 
-// calculateDiskConfigGiB returns the boot disk size, total local-SSD GiB, and
-// local-SSD count that will be attached to the instance.
-//
-// Local-SSD count precedence (count → total GiB is computed via
-// localssd.TotalGiB):
-//
-//  1. spec.localSsdCount (top-level) on flex families like n2d. Wins over
-//     legacy disks[] entries; bundled-SSD families are already filtered out
-//     by the tryCreateInstance conflict check in pkg/providers/instance.
-//  2. disks[].category=local-ssd entries (deprecated legacy shape).
-//  3. machineType.bundledLocalSsds.partitionCount.
-//
-// Note: this precedence is intentionally inverted relative to
-// instance.resolveLocalSSDCount, which writes kube-env after the conflict
-// check has already run and therefore treats BundledLocalSsds as
-// authoritative. The two functions only diverge when a bundled SKU escapes
-// the conflict check (a known gap for accelerator families that lack an
-// -lssd-family suffix); see resolveLocalSSDCount for details.
-//
-// Boot disk: explicit disks[].boot=true entry if present, else 100 GiB default.
-func calculateDiskConfigGiB(nodeClass *v1alpha1.GCENodeClass, mt *computepb.MachineType) (int64, int64, int64) {
+// calculateDiskConfigGiB returns the boot disk size and total local-SSD GiB
+// for a single InstanceType variant. The caller (instancetype.List) picks the
+// ssdCount per variant; this function does not derive count from nodeClass.
+func calculateDiskConfigGiB(nodeClass *v1alpha1.GCENodeClass, mt *computepb.MachineType, ssdCount int64) (int64, int64) {
 	bootDiskGiB := int64(100)
-	var ssdCount int64
-
 	if nodeClass != nil {
 		for _, disk := range nodeClass.Spec.Disks {
 			if disk.Boot && disk.SizeGiB > 0 {
@@ -261,23 +260,7 @@ func calculateDiskConfigGiB(nodeClass *v1alpha1.GCENodeClass, mt *computepb.Mach
 				break
 			}
 		}
-		if nodeClass.Spec.LocalSsdCount > 0 {
-			ssdCount = int64(nodeClass.Spec.LocalSsdCount)
-		} else {
-			for _, disk := range nodeClass.Spec.Disks {
-				if disk.Category == "local-ssd" {
-					ssdCount++
-				}
-			}
-		}
 	}
-
-	if ssdCount == 0 {
-		if bls := mt.GetBundledLocalSsds(); bls != nil && bls.PartitionCount != nil && *bls.PartitionCount > 0 {
-			ssdCount = int64(*bls.PartitionCount)
-		}
-	}
-
 	totalSSDGiB := localssd.TotalGiB(aws.StringValue(mt.Name), int(ssdCount))
-	return bootDiskGiB, totalSSDGiB, ssdCount
+	return bootDiskGiB, totalSSDGiB
 }

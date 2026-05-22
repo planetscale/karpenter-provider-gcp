@@ -35,6 +35,7 @@ import (
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 	corev1 "k8s.io/api/core/v1"
+	apiresource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
@@ -571,7 +572,7 @@ func TestRenderDiskProperties_NoProvisioningWhenFieldsAreNil(t *testing.T) {
 	p := &DefaultProvider{projectID: "my-project"}
 	nodeClass := bootDiskNodeClass("pd-ssd", nil, nil)
 
-	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a")
+	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a", 0)
 	require.NoError(t, err)
 
 	require.Len(t, disks, 1)
@@ -585,7 +586,7 @@ func TestRenderDiskProperties_SetsProvisionedIOPS(t *testing.T) {
 	p := &DefaultProvider{projectID: "my-project"}
 	nodeClass := bootDiskNodeClass("pd-extreme", ptr.To(int64(5000)), nil)
 
-	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a")
+	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a", 0)
 	require.NoError(t, err)
 
 	require.Len(t, disks, 1)
@@ -599,7 +600,7 @@ func TestRenderDiskProperties_SetsProvisionedThroughput(t *testing.T) {
 	p := &DefaultProvider{projectID: "my-project"}
 	nodeClass := bootDiskNodeClass("hyperdisk-throughput", nil, ptr.To(int64(500)))
 
-	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a")
+	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a", 0)
 	require.NoError(t, err)
 
 	require.Len(t, disks, 1)
@@ -613,7 +614,7 @@ func TestRenderDiskProperties_SetsBothIOPSAndThroughput(t *testing.T) {
 	p := &DefaultProvider{projectID: "my-project"}
 	nodeClass := bootDiskNodeClass("hyperdisk-balanced", ptr.To(int64(10000)), ptr.To(int64(400)))
 
-	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a")
+	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a", 0)
 	require.NoError(t, err)
 
 	require.Len(t, disks, 1)
@@ -635,29 +636,31 @@ func countScratch(disks []*compute.AttachedDisk) int {
 	return n
 }
 
-func TestRenderDiskProperties_LocalSsdCountEmitsScratchDisks(t *testing.T) {
+// TestRenderDiskProperties_SsdCountEmitsScratchDisks pins the SCRATCH-disk
+// count to the resolved ssdCount parameter (which tryCreateInstance derives
+// from the NodeClaim's count requirement / BundledLocalSsds). Legacy
+// disks[].category=local-ssd entries on the NodeClass do not contribute to
+// the SCRATCH count — they are skipped here so we don't double-attach.
+func TestRenderDiskProperties_SsdCountEmitsScratchDisks(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
 		name             string
-		localSsdCount    int32
+		ssdCount         int
 		legacyEntries    int
 		wantScratchCount int
 	}{
-		{name: "no SSDs at all", localSsdCount: 0, legacyEntries: 0, wantScratchCount: 0},
-		{name: "LocalSsdCount=2, no legacy entries", localSsdCount: 2, legacyEntries: 0, wantScratchCount: 2},
-		{name: "legacy 2 entries, no top-level count", localSsdCount: 0, legacyEntries: 2, wantScratchCount: 2},
-		{
-			// Top-level wins; legacy entries are ignored so we don't double-count.
-			name: "top-level 3 overrides 1 legacy entry", localSsdCount: 3, legacyEntries: 1, wantScratchCount: 3,
-		},
+		{name: "no SSDs at all", ssdCount: 0, legacyEntries: 0, wantScratchCount: 0},
+		{name: "ssdCount=2, no legacy entries", ssdCount: 2, legacyEntries: 0, wantScratchCount: 2},
+		{name: "ssdCount=0 with 2 legacy entries → still 0 (legacy ignored)", ssdCount: 0, legacyEntries: 2, wantScratchCount: 0},
+		{name: "ssdCount=3 with 1 legacy entry → 3 (legacy ignored)", ssdCount: 3, legacyEntries: 1, wantScratchCount: 3},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			nc := &v1alpha1.GCENodeClass{
 				Spec: v1alpha1.GCENodeClassSpec{
-					LocalSsdCount: tc.localSsdCount,
 					Disks: []v1alpha1.Disk{
 						{Boot: true, SizeGiB: 50, Category: "pd-balanced"},
 					},
@@ -676,7 +679,7 @@ func TestRenderDiskProperties_LocalSsdCountEmitsScratchDisks(t *testing.T) {
 			}
 
 			p := &DefaultProvider{projectID: "my-project"}
-			disks, err := p.renderDiskProperties(amd64InstanceType(), nc, "us-central1-a")
+			disks, err := p.renderDiskProperties(amd64InstanceType(), nc, "us-central1-a", tc.ssdCount)
 			require.NoError(t, err)
 			require.Equal(t, tc.wantScratchCount, countScratch(disks),
 				"expected %d SCRATCH local-SSD disks", tc.wantScratchCount)
@@ -720,7 +723,7 @@ func TestRenderDiskProperties_MultipleDisksSetProvisioningIndependently(t *testi
 		},
 	}
 
-	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a")
+	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a", 0)
 	require.NoError(t, err)
 
 	require.Len(t, disks, 2)
@@ -1662,4 +1665,194 @@ func TestOnHostMaintenancePolicy(t *testing.T) {
 			require.Equal(t, tc.want, onHostMaintenancePolicy(tc.instanceType, tc.capacityType, tc.mt))
 		})
 	}
+}
+
+// makeVariant builds an InstanceType stand-in for orderInstanceTypesByPrice
+// tests. Each variant has one OD offering at price odPrice and the SSD-count
+// requirement pinned to ssdCount. memMiB shows up as Capacity[memory] and
+// (when nonzero) as Capacity[ephemeral-storage] in GiB to drive capacity-based
+// filtering in case 3.
+func makeVariant(name string, odPrice float64, ssdCount int, ephemeralGiB int64) *cloudprovider.InstanceType {
+	reqs := scheduling.NewRequirements(
+		scheduling.NewRequirement(corev1.LabelInstanceTypeStable, corev1.NodeSelectorOpIn, name),
+		scheduling.NewRequirement(v1alpha1.LabelInstanceLocalSsdCount, corev1.NodeSelectorOpIn, fmt.Sprintf("%d", ssdCount)),
+	)
+	offering := &cloudprovider.Offering{
+		Available: true,
+		Price:     odPrice,
+		Requirements: scheduling.NewRequirements(
+			scheduling.NewRequirement(karpv1.CapacityTypeLabelKey, corev1.NodeSelectorOpIn, karpv1.CapacityTypeOnDemand),
+			scheduling.NewRequirement(corev1.LabelTopologyZone, corev1.NodeSelectorOpIn, "us-central1-a"),
+		),
+	}
+	cap := corev1.ResourceList{}
+	if ephemeralGiB > 0 {
+		cap[corev1.ResourceEphemeralStorage] = *apiresource.NewQuantity(ephemeralGiB*1024*1024*1024, apiresource.BinarySI)
+	}
+	return &cloudprovider.InstanceType{
+		Name:         name,
+		Requirements: reqs,
+		Offerings:    cloudprovider.Offerings{offering},
+		Capacity:     cap,
+	}
+}
+
+// orderedVariantSSDCounts extracts the SSD-count of each variant for assertions.
+func orderedVariantSSDCounts(its []*cloudprovider.InstanceType) []int {
+	out := make([]int, len(its))
+	for i, it := range its {
+		out[i] = variantSSDCount(it)
+	}
+	return out
+}
+
+// TestVariantSSDCount pins the helper's behavior on the requirement values
+// that instancetype.List actually emits (single In:["N"] entries), plus the
+// fallback for variants without the requirement (treated as 0).
+func TestVariantSSDCount(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		it   *cloudprovider.InstanceType
+		want int
+	}{
+		{
+			name: "count=0 variant",
+			it:   makeVariant("n2d-standard-8", 1.0, 0, 0),
+			want: 0,
+		},
+		{
+			name: "count=4 variant",
+			it:   makeVariant("n2d-standard-8", 1.0, 4, 0),
+			want: 4,
+		},
+		{
+			name: "count=24 variant",
+			it:   makeVariant("n2d-standard-8", 1.0, 24, 0),
+			want: 24,
+		},
+		{
+			name: "no requirement → 0",
+			it: &cloudprovider.InstanceType{
+				Name: "e2-medium",
+				Requirements: scheduling.NewRequirements(
+					scheduling.NewRequirement(corev1.LabelInstanceTypeStable, corev1.NodeSelectorOpIn, "e2-medium"),
+				),
+			},
+			want: 0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, variantSSDCount(tc.it))
+		})
+	}
+}
+
+// TestOrderInstanceTypesByPrice_Case1_NoCountSelector covers the dominant
+// pod shape: instance-type pinned, no instance-local-ssd-count selector.
+// Variants share Name and price; the SSD-count tie-break must put count=0
+// first deterministically — otherwise the unstable sort.Slice can land the
+// pod on a random non-zero variant (this is the F6 bug pricing-diff used to
+// mask, see consolidation discussion in the joem/local-ssd-node-label-refactor
+// branch).
+func TestOrderInstanceTypesByPrice_Case1_NoCountSelector(t *testing.T) {
+	t.Parallel()
+
+	requirements := scheduling.NewRequirements(
+		scheduling.NewRequirement(corev1.LabelInstanceTypeStable, corev1.NodeSelectorOpIn, "n2d-standard-8"),
+		scheduling.NewRequirement(karpv1.CapacityTypeLabelKey, corev1.NodeSelectorOpIn, karpv1.CapacityTypeOnDemand),
+	)
+
+	// Same-price variants in scrambled emission order. The sort must put
+	// count=0 first regardless of input order.
+	for _, perm := range [][]int{
+		{4, 0, 16, 2, 24, 1, 8},
+		{24, 16, 8, 4, 2, 1, 0},
+		{0, 1, 2, 4, 8, 16, 24},
+	} {
+		var in []*cloudprovider.InstanceType
+		for _, c := range perm {
+			in = append(in, makeVariant("n2d-standard-8", 1.0, c, 0))
+		}
+		got := orderedVariantSSDCounts(orderInstanceTypesByPrice(in, requirements))
+		require.Equal(t, []int{0, 1, 2, 4, 8, 16, 24}, got,
+			"variant order should be deterministic ascending regardless of input permutation %v", perm)
+	}
+}
+
+// TestOrderInstanceTypesByPrice_Case2_CountSelector covers the pod-pins-count
+// shape. The pod's label selector filters InstanceTypeOptions to a single
+// variant before orderInstanceTypesByPrice runs, so the helper sees one
+// element and must return it untouched.
+func TestOrderInstanceTypesByPrice_Case2_CountSelector(t *testing.T) {
+	t.Parallel()
+
+	// Karpenter would filter to one variant via the pod's nodeSelector
+	// {LabelInstanceLocalSsdCount: "4"} before calling us. We assert the
+	// helper handles n=1 correctly.
+	requirements := scheduling.NewRequirements(
+		scheduling.NewRequirement(corev1.LabelInstanceTypeStable, corev1.NodeSelectorOpIn, "n2d-standard-8"),
+		scheduling.NewRequirement(v1alpha1.LabelInstanceLocalSsdCount, corev1.NodeSelectorOpIn, "4"),
+		scheduling.NewRequirement(karpv1.CapacityTypeLabelKey, corev1.NodeSelectorOpIn, karpv1.CapacityTypeOnDemand),
+	)
+	in := []*cloudprovider.InstanceType{makeVariant("n2d-standard-8", 1.0, 4, 0)}
+	got := orderedVariantSSDCounts(orderInstanceTypesByPrice(in, requirements))
+	require.Equal(t, []int{4}, got)
+}
+
+// TestOrderInstanceTypesByPrice_Case3_EphemeralCapacity covers the
+// capacity-driven Ephemeral path: a pod requests ephemeral-storage; Karpenter
+// filters variants whose Capacity[ephemeral-storage] satisfies the request;
+// the remaining set ties on price and Name. The SSD-count tie-break must
+// place the smallest satisfying variant first so the pod doesn't waste SSDs.
+func TestOrderInstanceTypesByPrice_Case3_EphemeralCapacity(t *testing.T) {
+	t.Parallel()
+
+	requirements := scheduling.NewRequirements(
+		scheduling.NewRequirement(corev1.LabelInstanceTypeStable, corev1.NodeSelectorOpIn, "n2d-standard-8"),
+		scheduling.NewRequirement(karpv1.CapacityTypeLabelKey, corev1.NodeSelectorOpIn, karpv1.CapacityTypeOnDemand),
+	)
+
+	// Simulate Karpenter-side capacity filter: pod wants ≥500 GiB ephemeral,
+	// so count=0 (0 GiB) and count=1 (375 GiB) variants are pre-filtered
+	// out; the helper sees {2, 4, 8, 16, 24} all satisfying.
+	in := []*cloudprovider.InstanceType{
+		makeVariant("n2d-standard-8", 1.0, 24, 24*375),
+		makeVariant("n2d-standard-8", 1.0, 4, 4*375),
+		makeVariant("n2d-standard-8", 1.0, 8, 8*375),
+		makeVariant("n2d-standard-8", 1.0, 2, 2*375),
+		makeVariant("n2d-standard-8", 1.0, 16, 16*375),
+	}
+	got := orderedVariantSSDCounts(orderInstanceTypesByPrice(in, requirements))
+	require.Equal(t, []int{2, 4, 8, 16, 24}, got,
+		"under same price, smallest satisfying SSD count must win — over-provisioning would waste SSDs")
+}
+
+// TestOrderInstanceTypesByPrice_DistinctMachineTypes asserts the original
+// price + Name ordering still applies across distinct machine-type families.
+// SSD-count is a final-tier tiebreak; it must not perturb cross-family order.
+func TestOrderInstanceTypesByPrice_DistinctMachineTypes(t *testing.T) {
+	t.Parallel()
+
+	requirements := scheduling.NewRequirements(
+		scheduling.NewRequirement(karpv1.CapacityTypeLabelKey, corev1.NodeSelectorOpIn, karpv1.CapacityTypeOnDemand),
+	)
+	in := []*cloudprovider.InstanceType{
+		makeVariant("n2d-standard-8", 2.0, 4, 0),
+		makeVariant("n2-standard-4", 1.0, 0, 0),
+		makeVariant("n2-standard-4", 1.0, 2, 0),
+		makeVariant("n2d-standard-8", 2.0, 0, 0),
+	}
+	got := orderInstanceTypesByPrice(in, requirements)
+	names := make([]string, len(got))
+	counts := make([]int, len(got))
+	for i, it := range got {
+		names[i] = it.Name
+		counts[i] = variantSSDCount(it)
+	}
+	require.Equal(t, []string{"n2-standard-4", "n2-standard-4", "n2d-standard-8", "n2d-standard-8"}, names)
+	require.Equal(t, []int{0, 2, 0, 4}, counts)
 }

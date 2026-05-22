@@ -25,45 +25,52 @@ import (
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/apis/v1alpha1"
 )
 
+// Name-based fallback markers for hasBundledLocalSSDs. `-nolssd` siblings
+// (e.g. a3-ultragpu-8g-nolssd) are explicitly excluded before these are
+// considered, so we don't list a negative form here.
+var (
+	bundledLocalSSDSuffixes = []string{
+		"-lssd",           // C3, C3D, C4 VM, C4A, C4D, H4D
+		"-lssd-metal",     // C4 metal
+		"-standardlssd",   // Z3
+		"-highlssd",       // Z3
+		"-highlssd-metal", // Z3 metal
+	}
+	bundledLocalSSDPrefixes = []string{
+		"a2-ultragpu-", // A2 ultra (a2-standard is NOT bundled)
+		"a3-",          // all current A3 SKUs (excluding -nolssd siblings)
+		"a4-",
+		"a4x-",
+	}
+)
+
 // hasBundledLocalSSDs reports whether the named machine type bundles local SSDs
 // (count is fixed by the machine type, not user config).
 //
 // The API field `MachineType.BundledLocalSsds.PartitionCount` is the
 // authoritative signal and is preferred when mt is non-nil. The name-based
-// fallback is used only when the instance-type cache is empty (e.g. partial
-// refresh, or a code path that doesn't have the MachineType in scope).
-//
-// Name-based fallback families:
-//
-//	suffix -lssd / -lssd-metal              C3, C3D, C4 VM, C4A, C4D, H4D, C4 metal
-//	suffix -standardlssd / -highlssd        Z3 (incl. -highlssd-metal)
-//	prefix a2-ultragpu-                     A2 ultra (a2-standard is NOT bundled)
-//	prefix a3- / a4- / a4x-                 all current accelerator SKUs except -nolssd siblings
-//
-// `-nolssd` siblings (e.g. a3-ultragpu-8g-nolssd, a3-edgegpu-8g-nolssd) are
-// explicitly excluded by suffix.
+// fallback (the suffix/prefix tables above) is used only when the
+// instance-type cache is empty (e.g. partial refresh, or a code path that
+// doesn't have the MachineType in scope).
 func hasBundledLocalSSDs(name string, mt *computepb.MachineType) bool {
 	if mt != nil {
-		if bls := mt.GetBundledLocalSsds(); bls != nil && bls.PartitionCount != nil && *bls.PartitionCount > 0 {
-			return true
-		}
-		// Cache hit with no bundled SSDs reported is authoritative: not bundled.
-		return false
+		bls := mt.GetBundledLocalSsds()
+		return bls != nil && bls.PartitionCount != nil && *bls.PartitionCount > 0
 	}
 	if strings.HasSuffix(name, "-nolssd") {
 		return false
 	}
-	if strings.HasSuffix(name, "-lssd") ||
-		strings.HasSuffix(name, "-lssd-metal") ||
-		strings.HasSuffix(name, "-standardlssd") ||
-		strings.HasSuffix(name, "-highlssd") ||
-		strings.HasSuffix(name, "-highlssd-metal") {
-		return true
+	for _, s := range bundledLocalSSDSuffixes {
+		if strings.HasSuffix(name, s) {
+			return true
+		}
 	}
-	return strings.HasPrefix(name, "a2-ultragpu-") ||
-		strings.HasPrefix(name, "a3-") ||
-		strings.HasPrefix(name, "a4-") ||
-		strings.HasPrefix(name, "a4x-")
+	for _, p := range bundledLocalSSDPrefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // hasLegacyLocalSSDDisk reports whether the NodeClass declares any
@@ -81,10 +88,14 @@ func hasLegacyLocalSSDDisk(nodeClass *v1alpha1.GCENodeClass) bool {
 }
 
 // evaluateLocalSSDConflict returns a non-nil error if the NodeClass declares
-// local SSDs (top-level count or legacy disk entry) on a machine type that
-// already bundles them. The returned error is wrapped in *retryableError by
-// the caller so the Create loop falls through to a compatible instance type
+// legacy disks[].category=local-ssd entries on a machine type that already
+// bundles local SSDs. The returned error is wrapped in *retryableError by the
+// caller so the Create loop falls through to a compatible instance type
 // rather than producing a node with more SCRATCH disks than the SKU allows.
+//
+// Note: spec.localSsdCount is no longer checked here — it has been
+// soft-deprecated and is silently ignored across the controller. Pin the
+// count via the karpenter.k8s.gcp/instance-local-ssd-count label instead.
 //
 // Pass mt from the instance-type cache when available; the helper prefers the
 // API signal over name-based matching.
@@ -92,10 +103,10 @@ func evaluateLocalSSDConflict(nodeClass *v1alpha1.GCENodeClass, instanceTypeName
 	if nodeClass == nil || !hasBundledLocalSSDs(instanceTypeName, mt) {
 		return nil
 	}
-	if nodeClass.Spec.LocalSsdCount == 0 && !hasLegacyLocalSSDDisk(nodeClass) {
+	if !hasLegacyLocalSSDDisk(nodeClass) {
 		return nil
 	}
 	return fmt.Errorf(
-		"machine type %s bundles local SSDs; remove spec.localSsdCount and any disks[].category=local-ssd entries (use spec.localSsdMode to control exposure)",
+		"machine type %s bundles local SSDs; remove disks[].category=local-ssd entries (use spec.localSsdMode to control exposure)",
 		instanceTypeName)
 }
