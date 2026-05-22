@@ -94,6 +94,15 @@ type GCENodeClassSpec struct {
 	// Disabled by default to preserve backward compatibility.
 	// +optional
 	AutoGPUTaint bool `json:"autoGPUTaint,omitempty"`
+	// GPUDriverVersion controls which NVIDIA driver version GKE installs on GPU nodes.
+	// Mirrors the GKE node pool gpu_driver_installation_config.gpu_driver_version field.
+	// Valid values: "default" (GKE-recommended stable), "latest" (newest, COS only),
+	// "disabled" (skip automatic installation).
+	// Ignored for non-GPU instance types.
+	// +kubebuilder:validation:Enum=default;latest;disabled
+	// +kubebuilder:default=default
+	// +optional
+	GPUDriverVersion string `json:"gpuDriverVersion,omitempty"`
 	// LocalSsdMode controls how local SSDs are exposed to workloads on machine
 	// types that ship local SSDs (configurable families with a non-zero count
 	// pinned at scheduling time, or bundled-SSD SKUs like -lssd / z3 / a3).
@@ -165,6 +174,8 @@ type ImageSelectorTerm struct {
 	// Valid families include: ContainerOptimizedOS,Ubuntu
 	// +kubebuilder:validation:XValidation:message="'alias' is improperly formatted, must match the format 'family@version'",rule="self.matches('^[a-zA-Z0-9]+@.+$')"
 	// +kubebuilder:validation:XValidation:message="family is not supported, must be one of the following: 'ContainerOptimizedOS,Ubuntu'",rule="self.find('^[^@]+') in ['ContainerOptimizedOS', 'Ubuntu']"
+	// +kubebuilder:validation:XValidation:message="ContainerOptimizedOS version must be 'latest' or 'milestone.build.build.build' (e.g. '125.19216.104.126')",rule="!self.startsWith('ContainerOptimizedOS@') || self.matches('^ContainerOptimizedOS@(latest|[0-9]+[.][0-9]+[.][0-9]+[.][0-9]+)$')"
+	// +kubebuilder:validation:XValidation:message="Ubuntu version must be 'latest' or 'vYYYYMMDD' (e.g. 'v20260416')",rule="!self.startsWith('Ubuntu@') || self.matches('^Ubuntu@(latest|v[0-9]{8})$')"
 	// +kubebuilder:validation:MaxLength=60
 	// +optional
 	Alias string `json:"alias,omitempty"`

@@ -29,7 +29,6 @@ import (
 
 	compute "cloud.google.com/go/compute/apiv1"
 	"cloud.google.com/go/compute/apiv1/computepb"
-	"github.com/aws/aws-sdk-go/aws"
 	"github.com/mitchellh/hashstructure/v2"
 	"github.com/patrickmn/go-cache"
 	"github.com/samber/lo"
@@ -159,7 +158,7 @@ func (p *DefaultProvider) List(ctx context.Context, nodeClass *v1alpha1.GCENodeC
 
 	instanceTypes := []*cloudprovider.InstanceType{}
 	for _, mt := range p.instanceTypesInfo {
-		instanceType := aws.StringValue(mt.Name)
+		instanceType := lo.FromPtr(mt.Name)
 		if instanceType == "" || mt.MemoryMb == nil || mt.GuestCpus == nil {
 			continue
 		}
@@ -186,7 +185,7 @@ func (p *DefaultProvider) List(ctx context.Context, nodeClass *v1alpha1.GCENodeC
 // Bundled-SSD SKUs get a single variant pinned to the bundled count.
 // Everything else gets a single {0} variant.
 func ssdCountVariants(mt *computepb.MachineType) []int64 {
-	name := aws.StringValue(mt.Name)
+	name := lo.FromPtr(mt.Name)
 	if localssd.FamilySupportsConfigurableLocalSSDs(name) {
 		allowed := localssd.AllowedLocalSSDCounts(name, mt.GetGuestCpus())
 		out := make([]int64, 0, len(allowed)+1)
@@ -308,7 +307,7 @@ func (p *DefaultProvider) UpdateInstanceTypes(ctx context.Context) error {
 	p.instanceTypesInfo = types
 	byName := make(map[string]*computepb.MachineType, len(types))
 	for _, mt := range types {
-		byName[aws.StringValue(mt.Name)] = mt
+		byName[lo.FromPtr(mt.Name)] = mt
 	}
 	p.instanceTypesByName = byName
 

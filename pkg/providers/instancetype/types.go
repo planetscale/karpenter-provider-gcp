@@ -22,7 +22,6 @@ import (
 	"strings"
 
 	"cloud.google.com/go/compute/apiv1/computepb"
-	"github.com/aws/aws-sdk-go/aws"
 	"github.com/samber/lo"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -66,7 +65,7 @@ func NewInstanceType(ctx context.Context, mt *computepb.MachineType, nodeClass *
 	totalStorageBytes := totalStorageGiB * 1024 * 1024 * 1024
 
 	reservedCPU, reservedMemory, evictionMemory, ephemeralEviction, ephemeralSystem := utils.ResolveReservedResource(
-		aws.StringValue(mt.Name),
+		lo.FromPtr(mt.Name),
 		int64(mt.GetGuestCpus()*1000),
 		int64(mt.GetMemoryMb()),
 		bootDiskGiB,
@@ -75,7 +74,7 @@ func NewInstanceType(ctx context.Context, mt *computepb.MachineType, nodeClass *
 	)
 
 	log.FromContext(ctx).V(1).Info("calculated ephemeral storage reservations",
-		"instanceType", aws.StringValue(mt.Name),
+		"instanceType", lo.FromPtr(mt.Name),
 		"bootDiskGiB", bootDiskGiB,
 		"totalSSDGiB", totalSSDGiB,
 		"localSSDCount", ssdCount,
@@ -98,7 +97,7 @@ func NewInstanceType(ctx context.Context, mt *computepb.MachineType, nodeClass *
 	}
 
 	it := &cloudprovider.InstanceType{
-		Name:         aws.StringValue(mt.Name),
+		Name:         lo.FromPtr(mt.Name),
 		Requirements: computeRequirements(mt, offerings, region, ssdCount),
 		Offerings:    offerings,
 		Capacity:     computeCapacity(ctx, mt, nodeClass, totalStorageBytes),
@@ -122,7 +121,7 @@ func extractCategory(part string) string {
 func computeRequirements(mt *computepb.MachineType, offerings cloudprovider.Offerings, region string, ssdCount int64) scheduling.Requirements {
 	requirements := scheduling.NewRequirements(
 		// Well Known Upstream
-		scheduling.NewRequirement(corev1.LabelInstanceTypeStable, corev1.NodeSelectorOpIn, aws.StringValue(mt.Name)),
+		scheduling.NewRequirement(corev1.LabelInstanceTypeStable, corev1.NodeSelectorOpIn, lo.FromPtr(mt.Name)),
 		scheduling.NewRequirement(corev1.LabelArchStable, corev1.NodeSelectorOpDoesNotExist),
 		scheduling.NewRequirement(corev1.LabelOSStable, corev1.NodeSelectorOpIn, string(corev1.Linux)),
 		scheduling.NewRequirement(corev1.LabelTopologyZone, corev1.NodeSelectorOpIn, lo.Map(offerings.Available(), func(o *cloudprovider.Offering, _ int) string {
@@ -149,6 +148,7 @@ func computeRequirements(mt *computepb.MachineType, offerings cloudprovider.Offe
 		scheduling.NewRequirement(v1alpha1.LabelInstanceGPUManufacturer, corev1.NodeSelectorOpDoesNotExist),
 		scheduling.NewRequirement(v1alpha1.LabelInstanceGPUCount, corev1.NodeSelectorOpDoesNotExist),
 		scheduling.NewRequirement(v1alpha1.LabelInstanceGPUMemory, corev1.NodeSelectorOpDoesNotExist),
+		scheduling.NewRequirement(v1alpha1.LabelGKEAccelerator, corev1.NodeSelectorOpDoesNotExist),
 	)
 	requirements.Add(localSSDCountRequirement(ssdCount))
 	// Only add zone-id label when available in offerings. It may not be available if a user has upgraded from a
@@ -165,11 +165,14 @@ func computeRequirements(mt *computepb.MachineType, offerings cloudprovider.Offe
 		gpuName := extractGPUName(mt)
 		requirements.Get(v1alpha1.LabelInstanceGPUName).Insert(gpuName)
 		requirements.Get(v1alpha1.LabelInstanceGPUCount).Insert(fmt.Sprintf("%d", len(mt.GetAccelerators())))
+		// LabelGKEAccelerator is required by the NVIDIA device plugin DaemonSet's nodeAffinity;
+		// without it the device plugin will not schedule onto this node.
+		requirements.Get(v1alpha1.LabelGKEAccelerator).Insert(gpuName)
 	}
 
 	// The format looks like: n1-standard-1, the family is n1-standard, the category is n, the instance size is 1
 	// Also, there is something like e2-medium, the family is e2, the category is e, the instance size is medium
-	instanceTypeParts := strings.Split(aws.StringValue(mt.Name), "-")
+	instanceTypeParts := strings.Split(lo.FromPtr(mt.Name), "-")
 	if len(instanceTypeParts) >= 2 {
 		requirements.Get(v1alpha1.LabelInstanceCategory).Insert(extractCategory(instanceTypeParts[0]))
 		sizeOffset := 1
@@ -261,6 +264,6 @@ func calculateDiskConfigGiB(nodeClass *v1alpha1.GCENodeClass, mt *computepb.Mach
 			}
 		}
 	}
-	totalSSDGiB := localssd.TotalGiB(aws.StringValue(mt.Name), int(ssdCount))
+	totalSSDGiB := localssd.TotalGiB(lo.FromPtr(mt.Name), int(ssdCount))
 	return bootDiskGiB, totalSSDGiB
 }
