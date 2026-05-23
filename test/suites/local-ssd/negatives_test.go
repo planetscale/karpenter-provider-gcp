@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package provisioning_test
+package localssd_test
 
 import (
 	"context"
@@ -29,7 +29,7 @@ import (
 )
 
 // These cases assert failure-mode behavior (pod stays Pending, NodeClaim
-// launch fails) and therefore cannot ride runProvisioningTest, which asserts
+// launch fails) and therefore cannot ride env.RunProvisioningTest, which asserts
 // the pod reaches Running.
 
 var _ = Describe("Local-SSD failure modes", func() {
@@ -149,7 +149,7 @@ var _ = Describe("Local-SSD failure modes", func() {
 
 // newLocalSSDPool creates the NodeClass + NodePool described by tc and
 // registers cleanup. Returns the shared resource name. Used only by failure-
-// mode tests in this file; positive cases run through runProvisioningTest.
+// mode tests in this file; positive cases run through env.RunProvisioningTest.
 func newLocalSSDPool(ctx context.Context, tc environment.TestCase) string {
 	prefix := environment.TestPrefix(tc.Arch, tc.CapacityType, "cos", "lssd")
 	name := prefix + "-" + environment.UniqueSuffix()

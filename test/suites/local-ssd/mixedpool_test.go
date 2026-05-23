@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package provisioning_test
+package localssd_test
 
 import (
 	"context"
@@ -30,7 +30,7 @@ import (
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/test/pkg/environment"
 )
 
-// Single-pod local-SSD coverage rides runProvisioningTest in provisioning_test.go.
+// Single-pod local-SSD coverage rides env.RunProvisioningTest from the environment package.
 // These cases run multiple pods on one NodeClass+NodePool and verify each pod
 // lands on its own correctly-sized node — the proliferation-collapse property
 // of the pod-label-driven design that single-pod tests can't show.
