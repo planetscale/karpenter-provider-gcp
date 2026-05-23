@@ -17,6 +17,8 @@ limitations under the License.
 package localssd_test
 
 import (
+	"os"
+	"slices"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -28,6 +30,9 @@ import (
 
 var _ = DescribeTable("Local SSD",
 	func(ctx SpecContext, tc environment.TestCase) {
+		if slices.Contains(tc.Families, "z3") && os.Getenv("E2E_Z3_TESTS") != "true" {
+			Skip("set E2E_Z3_TESTS=true to run z3 capacity-constrained tests")
+		}
 		env.RunProvisioningTest(ctx, tc)
 	},
 	// Bundled-SSD families: SSD count is fixed by the machine type. User must

@@ -18,6 +18,7 @@ package localssd_test
 
 import (
 	"context"
+	"os"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -55,6 +56,9 @@ var _ = Describe("Mixed local-SSD pool", func() {
 	}, SpecTimeout(20*time.Minute))
 
 	It("hyperdisk-balanced pool serves bundled SKUs and a no-SSD pod", func(ctx SpecContext) {
+		if os.Getenv("E2E_Z3_TESTS") != "true" {
+			Skip("set E2E_Z3_TESTS=true to run z3 capacity-constrained tests")
+		}
 		pool := newLocalSSDPool(ctx, environment.TestCase{
 			CapacityType:     karpv1.CapacityTypeOnDemand,
 			Arch:             karpv1.ArchitectureAmd64,
