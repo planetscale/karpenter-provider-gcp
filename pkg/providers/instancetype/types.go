@@ -53,12 +53,12 @@ func NewInstanceType(ctx context.Context, mt *computepb.MachineType, nodeClass *
 	// ephemeral storage falls back to the boot disk. Zero out the SSD inputs so
 	// ResolveReservedResource uses its boot-disk branch (option1/option2/100 GiB
 	// minimum) instead of the SSD-mode (50/75/100 GiB by count) branch.
-	effectiveSSDGiB, effectiveSSDCount := totalSSDGiB, ssdCount
+	kubeletEphemeralSSDGiB, kubeletEphemeralSSDCount := totalSSDGiB, ssdCount
 	if nodeClass.Spec.LocalSsdMode != v1alpha1.LocalSSDModeEphemeral {
-		effectiveSSDGiB, effectiveSSDCount = 0, 0
+		kubeletEphemeralSSDGiB, kubeletEphemeralSSDCount = 0, 0
 	}
 
-	totalStorageGiB := effectiveSSDGiB
+	totalStorageGiB := kubeletEphemeralSSDGiB
 	if totalStorageGiB == 0 {
 		totalStorageGiB = bootDiskGiB
 	}
@@ -69,17 +69,18 @@ func NewInstanceType(ctx context.Context, mt *computepb.MachineType, nodeClass *
 		int64(mt.GetGuestCpus()*1000),
 		int64(mt.GetMemoryMb()),
 		bootDiskGiB,
-		effectiveSSDGiB,
-		effectiveSSDCount,
+		kubeletEphemeralSSDGiB,
+		kubeletEphemeralSSDCount,
 	)
 
 	log.FromContext(ctx).V(1).Info("calculated ephemeral storage reservations",
 		"instanceType", lo.FromPtr(mt.Name),
+		"localSsdMode", nodeClass.Spec.LocalSsdMode,
 		"bootDiskGiB", bootDiskGiB,
 		"totalSSDGiB", totalSSDGiB,
 		"localSSDCount", ssdCount,
-		"effectiveSSDGiB", effectiveSSDGiB,
-		"effectiveSSDCount", effectiveSSDCount,
+		"kubeletEphemeralSSDGiB", kubeletEphemeralSSDGiB,
+		"kubeletEphemeralSSDCount", kubeletEphemeralSSDCount,
 		"ephemeralEviction", ephemeralEviction,
 		"ephemeralSystem", ephemeralSystem)
 
