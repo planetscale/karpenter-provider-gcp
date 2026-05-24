@@ -1988,9 +1988,7 @@ func TestVariantSSDCount(t *testing.T) {
 // pod shape: instance-type pinned, no instance-local-ssd-count selector.
 // Variants share Name and price; the SSD-count tie-break must put count=0
 // first deterministically — otherwise the unstable sort.Slice can land the
-// pod on a random non-zero variant (this is the F6 bug pricing-diff used to
-// mask, see consolidation discussion in the joem/local-ssd-node-label-refactor
-// branch).
+// pod on a random non-zero variant.
 func TestOrderInstanceTypesByPrice_Case1_NoCountSelector(t *testing.T) {
 	t.Parallel()
 

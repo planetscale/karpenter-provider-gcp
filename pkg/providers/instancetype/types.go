@@ -41,7 +41,7 @@ import (
 // allowed count (0 plus AllowedLocalSSDCounts) for configurable families,
 // and a single variant pinned to the bundled count (or 0) for everything else.
 func NewInstanceType(ctx context.Context, mt *computepb.MachineType, nodeClass *v1alpha1.GCENodeClass,
-	region string, offerings cloudprovider.Offerings, ssdCount int64) *cloudprovider.InstanceType {
+	region string, offerings cloudprovider.Offerings, ssdCount int) *cloudprovider.InstanceType {
 	if offerings == nil {
 		return nil
 	}
@@ -70,7 +70,7 @@ func NewInstanceType(ctx context.Context, mt *computepb.MachineType, nodeClass *
 		int64(mt.GetMemoryMb()),
 		bootDiskGiB,
 		kubeletEphemeralSSDGiB,
-		kubeletEphemeralSSDCount,
+		int64(kubeletEphemeralSSDCount),
 	)
 
 	log.FromContext(ctx).V(1).Info("calculated ephemeral storage reservations",
@@ -119,7 +119,7 @@ func extractCategory(part string) string {
 }
 
 //nolint:gocyclo
-func computeRequirements(mt *computepb.MachineType, offerings cloudprovider.Offerings, region string, ssdCount int64) scheduling.Requirements {
+func computeRequirements(mt *computepb.MachineType, offerings cloudprovider.Offerings, region string, ssdCount int) scheduling.Requirements {
 	requirements := scheduling.NewRequirements(
 		// Well Known Upstream
 		scheduling.NewRequirement(corev1.LabelInstanceTypeStable, corev1.NodeSelectorOpIn, lo.FromPtr(mt.Name)),
@@ -197,7 +197,7 @@ func computeRequirements(mt *computepb.MachineType, offerings cloudprovider.Offe
 // per variant: bundled SKUs get the bundled value; configurable families get
 // one variant per entry in {0} ∪ AllowedLocalSSDCounts; no-SSD-only families
 // get 0.
-func localSSDCountRequirement(ssdCount int64) *scheduling.Requirement {
+func localSSDCountRequirement(ssdCount int) *scheduling.Requirement {
 	return scheduling.NewRequirement(
 		v1alpha1.LabelInstanceLocalSsdCount,
 		corev1.NodeSelectorOpIn,
@@ -255,7 +255,7 @@ func memory(ctx context.Context, mt *computepb.MachineType) *resource.Quantity {
 // calculateDiskConfigGiB returns the boot disk size and total local-SSD GiB
 // for a single InstanceType variant. The caller (instancetype.List) picks the
 // ssdCount per variant; this function does not derive count from nodeClass.
-func calculateDiskConfigGiB(nodeClass *v1alpha1.GCENodeClass, mt *computepb.MachineType, ssdCount int64) (int64, int64) {
+func calculateDiskConfigGiB(nodeClass *v1alpha1.GCENodeClass, mt *computepb.MachineType, ssdCount int) (int64, int64) {
 	bootDiskGiB := int64(100)
 	if nodeClass != nil {
 		for _, disk := range nodeClass.Spec.Disks {
@@ -265,6 +265,6 @@ func calculateDiskConfigGiB(nodeClass *v1alpha1.GCENodeClass, mt *computepb.Mach
 			}
 		}
 	}
-	totalSSDGiB := localssd.TotalGiB(lo.FromPtr(mt.Name), int(ssdCount))
+	totalSSDGiB := localssd.TotalGiB(lo.FromPtr(mt.Name), ssdCount)
 	return bootDiskGiB, totalSSDGiB
 }

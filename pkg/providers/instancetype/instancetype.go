@@ -184,21 +184,16 @@ func (p *DefaultProvider) List(ctx context.Context, nodeClass *v1alpha1.GCENodeC
 // pick the smallest count that satisfies a pod's ephemeral-storage demand.
 // Bundled-SSD SKUs get a single variant pinned to the bundled count.
 // Everything else gets a single {0} variant.
-func ssdCountVariants(mt *computepb.MachineType) []int64 {
+func ssdCountVariants(mt *computepb.MachineType) []int {
 	name := lo.FromPtr(mt.Name)
 	if localssd.FamilySupportsConfigurableLocalSSDs(name) {
 		allowed := localssd.AllowedLocalSSDCounts(name, mt.GetGuestCpus())
-		out := make([]int64, 0, len(allowed)+1)
-		out = append(out, 0)
-		for _, c := range allowed {
-			out = append(out, int64(c))
-		}
-		return out
+		return append([]int{0}, allowed...)
 	}
 	if bls := mt.GetBundledLocalSsds(); bls != nil && bls.PartitionCount != nil && *bls.PartitionCount > 0 {
-		return []int64{int64(*bls.PartitionCount)}
+		return []int{int(*bls.PartitionCount)}
 	}
-	return []int64{0}
+	return []int{0}
 }
 
 // buildZoneData checks zonal availability from cached offerings while keeping spot

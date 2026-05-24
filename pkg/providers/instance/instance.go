@@ -376,10 +376,7 @@ func (e *retryableError) Error() string {
 }
 
 func (p *DefaultProvider) tryCreateInstance(ctx context.Context, nodeClass *v1alpha1.GCENodeClass, nodeClaim *karpv1.NodeClaim, instanceType *cloudprovider.InstanceType, capacityType string) (*compute.Instance, string, *compute.InstanceTemplate, error) {
-	var mt *computepb.MachineType
-	if p.instanceTypeProvider != nil {
-		mt = p.instanceTypeProvider.GetMachineType(instanceType.Name)
-	}
+	mt := p.instanceTypeProvider.GetMachineType(instanceType.Name)
 	// evaluateLocalSSDConflict tolerates a nil mt (falls back to the name-suffix
 	// predicate) because a conflict between user config and a name-recognized
 	// bundled family is always a config bug, not a cache state issue.
@@ -543,13 +540,13 @@ func orderInstanceTypesByPrice(instanceTypes []*cloudprovider.InstanceType, requ
 	return instanceTypes
 }
 
-// variantSSDCount returns the local-SSD count pinned on it's
+// variantSSDCount returns the local-SSD count pinned on its
 // karpenter.k8s.gcp/instance-local-ssd-count requirement. Returns 0 when the
 // requirement is absent or has a non-integer value (shouldn't happen — every
 // variant in instancetype.List sets it via localSSDCountRequirement).
 func variantSSDCount(it *cloudprovider.InstanceType) int {
 	req := it.Requirements.Get(v1alpha1.LabelInstanceLocalSsdCount)
-	if req == nil || len(req.Values()) == 0 {
+	if len(req.Values()) == 0 {
 		return 0
 	}
 	n, err := strconv.Atoi(req.Values()[0])
@@ -811,10 +808,6 @@ func (p *DefaultProvider) buildInstance(ctx context.Context, nodeClaim *karpv1.N
 	// Configure capacity provision
 	p.configureInstanceCapacityProvision(instance, capacityType)
 
-	// onHostMaintenancePolicy is a strict superset of the upstream GPU check
-	// (returns "TERMINATE" when LabelInstanceGPUCount > 0) and also handles
-	// spot, z3 bundled-SSD thresholds, metal, and h4d. isGPUInstance is left
-	// in scope because upstream's GPU-driver-injection path below still uses it.
 	if policy := onHostMaintenancePolicy(instanceType, capacityType, mt); policy != "" {
 		instance.Scheduling.OnHostMaintenance = policy
 	}

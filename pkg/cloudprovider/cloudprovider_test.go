@@ -126,9 +126,9 @@ func TestMatchVariantForInstance_ByGCELabel(t *testing.T) {
 
 func TestMatchVariantForInstance_AbsentLabelFallsBackToFirstNameMatch(t *testing.T) {
 	t.Parallel()
-	// Instances created before this refactor (or adopted externally) carry no
-	// SSD-count GCE label. Returning the first Name-match preserves the
-	// prior behavior rather than erroring out and stalling reconciliation.
+	// Externally adopted instances may carry no SSD-count GCE label.
+	// Returning the first Name-match keeps reconciliation moving rather
+	// than erroring out and stalling on a single unlabeled instance.
 	its := []*karpcloudprovider.InstanceType{
 		variantInstanceType("n2d-standard-8", "0"),
 		variantInstanceType("n2d-standard-8", "2"),

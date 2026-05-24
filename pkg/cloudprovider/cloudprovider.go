@@ -158,26 +158,39 @@ func (c *CloudProvider) resolveInstanceTypeFromInstance(ctx context.Context, ins
 	return instanceType, nil
 }
 
-// matchVariantForInstance picks the InstanceType whose Name matches the GCE
-// instance type AND whose karpenter.k8s.gcp/instance-local-ssd-count
-// requirement matches the SSD-count stamped on the instance at create time.
-// Configurable-SSD families emit multiple variants sharing one Name; without
-// this match, callers would always get the first variant (count=0), producing
-// a mislabelled NodeClaim during cloudprovider.List/Get reconciliation.
+// matchVariantForInstance maps a live GCE VM back to one of the
+// *cloudprovider.InstanceType records this provider previously offered to
+// Karpenter — used during List/Get reconciliation to rebuild a NodeClaim.
 //
-// Falls back to the first Name-match when the instance has no SSD-count label
-// (pre-refactor or externally-adopted instances): preserves the prior
-// behavior rather than refusing to resolve.
+// Most GCE machine families produce one InstanceType per Name, so a Name
+// lookup suffices. Configurable-local-SSD families (e.g. n2d-standard-8 with
+// 0/2/4/8/16/24 SSDs) are different: this provider emits one InstanceType
+// per allowed SSD count, all sharing the same Name but differing in their
+// requirement on karpenter.k8s.gcp/instance-local-ssd-count. Those are the
+// "variants." Picking the wrong one yields a NodeClaim whose capacity and
+// labels don't match the actual VM.
+//
+// To disambiguate, Create stamps the chosen count as a GCE label on the VM.
+// This function reads that label and picks the variant whose requirement
+// matches.
+//
+// Falls back to the first Name-match in two cases:
+//   - the VM has no SSD-count label: provisioned before this provider
+//     started stamping it, or adopted from outside Karpenter.
+//   - the label value matches no current variant: e.g. an SSD count that
+//     AllowedLocalSSDCounts no longer lists.
+//
+// Both keep reconciliation moving rather than stalling on one bad VM.
 func matchVariantForInstance(its []*cloudprovider.InstanceType, inst *instance.Instance) (*cloudprovider.InstanceType, bool) {
 	gceCountKey := utils.SanitizeGCELabelValue(v1alpha1.LabelInstanceLocalSsdCount)
 	wantCount, hasCount := inst.Labels[gceCountKey]
-	var first *cloudprovider.InstanceType
+	var fallback *cloudprovider.InstanceType
 	for _, i := range its {
 		if i.Name != inst.Type {
 			continue
 		}
-		if first == nil {
-			first = i
+		if fallback == nil {
+			fallback = i
 		}
 		if !hasCount {
 			return i, true
@@ -187,10 +200,7 @@ func matchVariantForInstance(its []*cloudprovider.InstanceType, inst *instance.I
 			return i, true
 		}
 	}
-	if first != nil {
-		return first, true
-	}
-	return nil, false
+	return fallback, fallback != nil
 }
 
 func (c *CloudProvider) resolveNodePoolFromInstance(ctx context.Context, instance *instance.Instance) (*karpv1.NodePool, error) {

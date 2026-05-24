@@ -32,9 +32,8 @@ import (
 )
 
 // TestResolveLocalSSDCount pins the precedence used to advertise the local-SSD
-// count to the GKE bootstrapper via kube-env. Cases cover the post-refactor
-// signature where the NodeClaim's scheduling.Requirements is the primary input
-// (replacing the legacy spec.LocalSsdCount path).
+// count to the GKE bootstrapper via kube-env. The NodeClaim's
+// scheduling.Requirements is the primary input.
 func TestResolveLocalSSDCount(t *testing.T) {
 	bundled := func(count int32) *computepb.MachineType {
 		return &computepb.MachineType{
@@ -118,7 +117,6 @@ func TestResolveLocalSSDCount(t *testing.T) {
 		},
 		// Transitional fallback: legacy disks[].category=local-ssd. Kept so
 		// existing NodeClasses continue to provision while disks[] is retired.
-		// Phase 4 may delete this branch.
 		{
 			name: "no count req + legacy disks[] → counted from disks[]",
 			reqs: scheduling.NewRequirements(),
