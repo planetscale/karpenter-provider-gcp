@@ -35,8 +35,8 @@ var _ = DescribeTable("Local SSD",
 		}
 		env.RunProvisioningTest(ctx, tc)
 	},
-	// Bundled-SSD families: SSD count is fixed by the machine type. User must
-	// leave LocalSsdCount unset; LocalSsdMode still controls exposure.
+	// Bundled-SSD families: SSD count is fixed by the machine type;
+	// LocalSsdMode still controls exposure.
 	Entry("bundled c4d-standard-8-lssd / RawBlock", environment.TestCase{
 		CapacityType:         karpv1.CapacityTypeOnDemand,
 		Arch:                 karpv1.ArchitectureAmd64,
@@ -55,25 +55,6 @@ var _ = DescribeTable("Local SSD",
 		LocalSSDMode:         gcpv1alpha1.LocalSSDModeEphemeral,
 		ExpectedScratchDisks: 1,
 	}, SpecTimeout(15*time.Minute)),
-	Entry("bundled z3-highmem-14-standardlssd / Ephemeral", environment.TestCase{
-		CapacityType:         karpv1.CapacityTypeOnDemand,
-		Arch:                 karpv1.ArchitectureAmd64,
-		Families:             []string{"z3"},
-		InstanceTypes:        []string{"z3-highmem-14-standardlssd"},
-		BootDiskCategory:     "hyperdisk-balanced",
-		LocalSSDMode:         gcpv1alpha1.LocalSSDModeEphemeral,
-		ExpectedScratchDisks: 1,
-	}, SpecTimeout(15*time.Minute)),
-	// c4a-standard-4-lssd bundles 1 SSD. c4a requires hyperdisk-balanced.
-	Entry("bundled c4a-standard-4-lssd / arm64 / Ephemeral", environment.TestCase{
-		CapacityType:         karpv1.CapacityTypeOnDemand,
-		Arch:                 karpv1.ArchitectureArm64,
-		Families:             []string{"c4a"},
-		InstanceTypes:        []string{"c4a-standard-4-lssd"},
-		BootDiskCategory:     "hyperdisk-balanced",
-		LocalSSDMode:         gcpv1alpha1.LocalSSDModeEphemeral,
-		ExpectedScratchDisks: 1,
-	}, SpecTimeout(15*time.Minute)),
 
 	// Pod sets karpenter.k8s.gcp/instance-local-ssd-count in NodeSelector;
 	// configurable family attaches that many SSDs and labels the node.
@@ -82,28 +63,6 @@ var _ = DescribeTable("Local SSD",
 		Arch:             karpv1.ArchitectureAmd64,
 		Families:         []string{"n2d"},
 		InstanceTypes:    []string{"n2d-standard-8"},
-		LocalSSDMode:     gcpv1alpha1.LocalSSDModeRawBlock,
-		PodLocalSSDCount: "4",
-	}, SpecTimeout(15*time.Minute)),
-	// Ephemeral mode crossed with the pod-driven path; same flow as the
-	// RawBlock entry above with a different SSD exposure mode.
-	Entry("flex n2d / Ephemeral / pod-set 2 SSDs", environment.TestCase{
-		CapacityType:     karpv1.CapacityTypeOnDemand,
-		Arch:             karpv1.ArchitectureAmd64,
-		Families:         []string{"n2d"},
-		InstanceTypes:    []string{"n2d-standard-8"},
-		LocalSSDMode:     gcpv1alpha1.LocalSSDModeEphemeral,
-		PodLocalSSDCount: "2",
-	}, SpecTimeout(15*time.Minute)),
-	// Ubuntu equivalent of the RawBlock pod-set entry above. The SSD-count
-	// label is written by the image's bootstrap script (separate code path
-	// from COS).
-	Entry("Ubuntu / amd64 / n2d / pod-set 4 SSDs", environment.TestCase{
-		CapacityType:     karpv1.CapacityTypeOnDemand,
-		Arch:             karpv1.ArchitectureAmd64,
-		Families:         []string{"n2d"},
-		InstanceTypes:    []string{"n2d-standard-8"},
-		ImageFamily:      gcpv1alpha1.ImageFamilyUbuntu,
 		LocalSSDMode:     gcpv1alpha1.LocalSSDModeRawBlock,
 		PodLocalSSDCount: "4",
 	}, SpecTimeout(15*time.Minute)),

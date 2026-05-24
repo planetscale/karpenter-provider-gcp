@@ -93,10 +93,6 @@ func hasLegacyLocalSSDDisk(nodeClass *v1alpha1.GCENodeClass) bool {
 // caller so the Create loop falls through to a compatible instance type
 // rather than producing a node with more SCRATCH disks than the SKU allows.
 //
-// Note: spec.localSsdCount is no longer checked here — it has been
-// soft-deprecated and is silently ignored across the controller. Pin the
-// count via the karpenter.k8s.gcp/instance-local-ssd-count label instead.
-//
 // Pass mt from the instance-type cache when available; the helper prefers the
 // API signal over name-based matching.
 func evaluateLocalSSDConflict(nodeClass *v1alpha1.GCENodeClass, instanceTypeName string, mt *computepb.MachineType) error {

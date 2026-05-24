@@ -160,15 +160,11 @@ func TestHasLegacyLocalSSDDisk(t *testing.T) {
 	})
 }
 
-// TestEvaluateLocalSSDConflict asserts the conflict helper's contract after
-// LocalSsdCount soft-deprecation:
-//
-//   - Only legacy disks[].category=local-ssd entries paired with a bundled-SSD
-//     machine type trigger a conflict.
-//   - spec.localSsdCount is silently ignored — even on bundled SKUs.
-//
-// tryCreateInstance wraps any returned error in *retryableError so the Create
-// loop tries a different instance type rather than failing the NodeClaim.
+// TestEvaluateLocalSSDConflict asserts the conflict helper's contract:
+// only legacy disks[].category=local-ssd entries paired with a bundled-SSD
+// machine type trigger a conflict. tryCreateInstance wraps any returned error
+// in *retryableError so the Create loop tries a different instance type
+// rather than failing the NodeClaim.
 func TestEvaluateLocalSSDConflict(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -177,13 +173,6 @@ func TestEvaluateLocalSSDConflict(t *testing.T) {
 		mt       *computepb.MachineType
 		wantConf bool
 	}{
-		{
-			name:     "bundled + LocalSsdCount=1 → no conflict (field ignored)",
-			nc:       &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 1}},
-			mtName:   "c4d-standard-8-lssd",
-			mt:       machineTypeWithBundledSSDs(2),
-			wantConf: false,
-		},
 		{
 			name: "bundled + legacy disk-entry → conflict",
 			nc: &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{

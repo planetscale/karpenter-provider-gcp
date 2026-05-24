@@ -78,49 +78,29 @@ func TestListEphemeralStorageCacheIsolation(t *testing.T) {
 		"each distinct disk config must produce a separate cache entry")
 }
 
-// TestListCacheKeyCoversLocalSSDFields verifies the List cache-key contract
-// around local-SSD-related spec fields:
-//
-//   - LocalSsdMode is part of the key: switching RawBlock↔Ephemeral must NOT
-//     reuse a cached entry, since the mode flips capacity/overhead semantics.
-//   - LocalSsdCount is NOT part of the key: the field is soft-deprecated and
-//     silently ignored, so different values must collapse to one cache entry.
-//     Per-count InstanceType variants are emitted inside a single List result
-//     by ssdCountVariants, not by re-listing per-NodeClass.
-func TestListCacheKeyCoversLocalSSDFields(t *testing.T) {
+// TestListCacheKeyCoversLocalSsdMode verifies that switching LocalSsdMode
+// (RawBlock↔Ephemeral) must NOT reuse a cached List entry, since the mode
+// flips capacity/overhead semantics. Per-count InstanceType variants are
+// emitted inside a single List result by ssdCountVariants, not by re-listing
+// per-NodeClass.
+func TestListCacheKeyCoversLocalSsdMode(t *testing.T) {
 	ctx := options.ToContext(context.Background(), &options.Options{VMMemoryOverheadPercent: 0.07})
 
-	t.Run("differing LocalSsdMode produces independent cache entries", func(t *testing.T) {
-		p := newTestProvider()
-		raw := &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{
-			LocalSsdMode: v1alpha1.LocalSSDModeRawBlock,
-		}}
-		eph := &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{
-			LocalSsdMode: v1alpha1.LocalSSDModeEphemeral,
-		}}
+	p := newTestProvider()
+	raw := &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{
+		LocalSsdMode: v1alpha1.LocalSSDModeRawBlock,
+	}}
+	eph := &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{
+		LocalSsdMode: v1alpha1.LocalSSDModeEphemeral,
+	}}
 
-		_, err := p.List(ctx, raw)
-		assert.NoError(t, err)
-		_, err = p.List(ctx, eph)
-		assert.NoError(t, err)
+	_, err := p.List(ctx, raw)
+	assert.NoError(t, err)
+	_, err = p.List(ctx, eph)
+	assert.NoError(t, err)
 
-		assert.Equal(t, 2, p.instanceTypesCache.ItemCount(),
-			"different LocalSsdMode must produce different cache entries")
-	})
-
-	t.Run("differing LocalSsdCount collapses to one cache entry", func(t *testing.T) {
-		p := newTestProvider()
-		nc1 := &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 1}}
-		nc2 := &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdCount: 2}}
-
-		_, err := p.List(ctx, nc1)
-		assert.NoError(t, err)
-		_, err = p.List(ctx, nc2)
-		assert.NoError(t, err)
-
-		assert.Equal(t, 1, p.instanceTypesCache.ItemCount(),
-			"LocalSsdCount is soft-deprecated and must not affect the cache key")
-	})
+	assert.Equal(t, 2, p.instanceTypesCache.ItemCount(),
+		"different LocalSsdMode must produce different cache entries")
 }
 
 func TestCalculateDiskConfiguration(t *testing.T) {
@@ -130,7 +110,7 @@ func TestCalculateDiskConfiguration(t *testing.T) {
 		mt               *computepb.MachineType
 		expectedBootGiB  int64
 		expectedSSDGiB   int64
-		expectedSSDCount int64
+		expectedSSDCount int
 	}{
 		{
 			name: "30GiB boot disk from nodeClass (issue #220)",
@@ -288,7 +268,7 @@ func TestCalculateDiskConfiguration(t *testing.T) {
 
 // TestNewInstanceTypeModeAware verifies that Capacity[ephemeral-storage] and
 // Overhead.KubeReserved[ephemeral-storage] are attributed correctly based on
-// (machine type, LocalSsdMode, LocalSsdCount).
+// (machine type, LocalSsdMode, resolved SSD count).
 //
 // RawBlock SSDs are not mounted as ephemeral storage and must not contribute
 // to Capacity or to the SSD-mode (50/75/100 GiB) kubeReserved reservation;
@@ -314,7 +294,7 @@ func TestNewInstanceTypeModeAware(t *testing.T) {
 		name            string
 		mt              *computepb.MachineType
 		mode            v1alpha1.LocalSSDMode
-		count           int32
+		count           int
 		wantCapGiB      int64
 		wantReservedGiB int64
 	}{
@@ -327,7 +307,7 @@ func TestNewInstanceTypeModeAware(t *testing.T) {
 			wantReservedGiB: bootModeReservedGiB,
 		},
 		{
-			name:            "n2d-standard-4 LocalSsdCount=2 RawBlock",
+			name:            "n2d-standard-4 count=2 RawBlock",
 			mt:              &computepb.MachineType{Name: lo.ToPtr("n2d-standard-4"), GuestCpus: lo.ToPtr[int32](4), MemoryMb: lo.ToPtr[int32](16384)},
 			mode:            v1alpha1.LocalSSDModeRawBlock,
 			count:           2,
@@ -335,7 +315,7 @@ func TestNewInstanceTypeModeAware(t *testing.T) {
 			wantReservedGiB: bootModeReservedGiB,
 		},
 		{
-			name:            "n2d-standard-4 LocalSsdCount=2 Ephemeral",
+			name:            "n2d-standard-4 count=2 Ephemeral",
 			mt:              &computepb.MachineType{Name: lo.ToPtr("n2d-standard-4"), GuestCpus: lo.ToPtr[int32](4), MemoryMb: lo.ToPtr[int32](16384)},
 			mode:            v1alpha1.LocalSSDModeEphemeral,
 			count:           2,
@@ -398,7 +378,7 @@ func TestNewInstanceTypeModeAware(t *testing.T) {
 					LocalSsdMode: tc.mode,
 				},
 			}
-			it := NewInstanceType(ctx, tc.mt, nc, "us-central1", offerings, int64(tc.count))
+			it := NewInstanceType(ctx, tc.mt, nc, "us-central1", offerings, tc.count)
 			assert.NotNil(t, it, "InstanceType should be non-nil")
 			cap := it.Capacity[corev1.ResourceEphemeralStorage]
 			res := it.Overhead.KubeReserved[corev1.ResourceEphemeralStorage]
@@ -414,7 +394,7 @@ func TestComputeRequirements(t *testing.T) {
 		mt        *computepb.MachineType
 		offerings cloudprovider.Offerings
 		region    string
-		ssdCount  int64
+		ssdCount  int
 		expected  scheduling.Requirements
 	}{
 		{
@@ -897,22 +877,22 @@ func TestSSDCountVariantsAscending(t *testing.T) {
 	cases := []struct {
 		name string
 		mt   *computepb.MachineType
-		want []int64
+		want []int
 	}{
 		{
 			name: "configurable n2d at top-of-family vCPU bracket",
 			mt:   &computepb.MachineType{Name: lo.ToPtr("n2d-standard-8"), GuestCpus: lo.ToPtr[int32](8)},
-			want: []int64{0, 1, 2, 4, 8, 16, 24},
+			want: []int{0, 1, 2, 4, 8, 16, 24},
 		},
 		{
 			name: "configurable n2 at lower vCPU bracket",
 			mt:   &computepb.MachineType{Name: lo.ToPtr("n2-standard-2"), GuestCpus: lo.ToPtr[int32](2)},
-			want: []int64{0, 1, 2, 4, 8, 16, 24},
+			want: []int{0, 1, 2, 4, 8, 16, 24},
 		},
 		{
 			name: "configurable c2 small bracket",
 			mt:   &computepb.MachineType{Name: lo.ToPtr("c2-standard-4"), GuestCpus: lo.ToPtr[int32](4)},
-			want: []int64{0, 1, 2, 4, 8},
+			want: []int{0, 1, 2, 4, 8},
 		},
 		{
 			name: "bundled SKU emits the pinned count, no zero",
@@ -921,12 +901,12 @@ func TestSSDCountVariantsAscending(t *testing.T) {
 				GuestCpus:        lo.ToPtr[int32](8),
 				BundledLocalSsds: &computepb.BundledLocalSsds{PartitionCount: lo.ToPtr[int32](1)},
 			},
-			want: []int64{1},
+			want: []int{1},
 		},
 		{
 			name: "no-SSD-only family emits {0}",
 			mt:   &computepb.MachineType{Name: lo.ToPtr("e2-medium"), GuestCpus: lo.ToPtr[int32](2)},
-			want: []int64{0},
+			want: []int{0},
 		},
 	}
 	for _, tc := range cases {

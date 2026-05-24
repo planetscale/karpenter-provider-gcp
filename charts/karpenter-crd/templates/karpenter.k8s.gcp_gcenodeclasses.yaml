@@ -360,19 +360,6 @@ spec:
                   rule: self.all(k, k !='karpenter.sh/nodeclaim')
                 - message: tag contains a restricted tag matching karpenter.k8s.gcp/gcenodeclass
                   rule: self.all(k, k !='karpenter.k8s.gcp/gcenodeclass')
-              localSsdCount:
-                description: |-
-                  LocalSsdCount is retained for schema compatibility but is silently
-                  ignored. Local-SSD count is now selected per pod via the well-known
-                  karpenter.k8s.gcp/instance-local-ssd-count label (the scheduler emits
-                  one InstanceType variant per allowed count for configurable families and
-                  pins the count for bundled-SSD SKUs).
-
-                  Deprecated: pin the count on the pod or NodePool via the
-                  karpenter.k8s.gcp/instance-local-ssd-count label requirement instead.
-                format: int32
-                minimum: 0
-                type: integer
               localSsdMode:
                 default: RawBlock
                 description: |-
