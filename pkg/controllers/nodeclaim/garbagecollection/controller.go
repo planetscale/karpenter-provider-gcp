@@ -36,12 +36,8 @@ import (
 )
 
 const (
-	gcInterval = 2 * time.Minute
-	// gcGracePeriod prevents newly created instances from being GC'd before their
-	// NodeClaim has been written to the API server. Must be ≥ gcInterval so an
-	// Insert that starts just after one GC pass gets a full cycle to complete —
-	// GCE Inserts can sometimes take longer than 30s.
-	gcGracePeriod = 2 * time.Minute
+	gcInterval    = 2 * time.Minute
+	gcGracePeriod = 3 * time.Minute
 )
 
 type Controller struct {
