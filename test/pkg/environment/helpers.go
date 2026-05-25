@@ -763,13 +763,15 @@ func (e *Environment) WaitForNodePoolReady(ctx context.Context, name string) {
 	e.waitForReadyCondition(ctx, nodePoolGVR, name, NodePoolReadyTimeout)
 }
 
-// WaitForPodUnschedulable polls until a pod with appLabel is Pending with the
-// PodScheduled condition set to False/Unschedulable, and stays in that state
-// for at least minStableDuration. The stability window prevents false
-// positives during the brief Pending period before scheduling completes.
-func (e *Environment) WaitForPodUnschedulable(ctx context.Context, appLabel string, minStableDuration time.Duration) {
-	var firstObserved time.Time
-	Eventually(func(g Gomega) {
+// ConsistentlyExpectPendingPods waits for a pod with appLabel to reach the
+// Unschedulable state, then asserts it remains there for the given duration.
+// Mirrors the AWS provider helper of the same name (Eventually-then-
+// Consistently); the per-poll check is stricter than AWS's phase-only
+// version: phase=Pending alone is ambiguous (a pod being launched is also
+// Pending), so we additionally require the PodScheduled=False/
+// Reason=Unschedulable condition that kube-scheduler emits when no node fits.
+func (e *Environment) ConsistentlyExpectPendingPods(ctx context.Context, appLabel string, duration time.Duration) {
+	check := func(g Gomega) {
 		pods, err := e.KubeClient.CoreV1().Pods(TestNamespace).List(ctx,
 			metav1.ListOptions{LabelSelector: fmt.Sprintf("app=%s", appLabel)})
 		g.Expect(err).NotTo(HaveOccurred())
@@ -789,18 +791,16 @@ func (e *Environment) WaitForPodUnschedulable(ctx context.Context, appLabel stri
 			}
 		}
 		g.Expect(hasFailedScheduling).To(BeTrue(),
-			"pod app=%s lacks Unschedulable condition yet", appLabel)
-
-		if firstObserved.IsZero() {
-			firstObserved = time.Now()
-		}
-		g.Expect(time.Since(firstObserved)).To(BeNumerically(">=", minStableDuration),
-			"pod app=%s Unschedulable but not yet stable (need %s)", appLabel, minStableDuration)
-	}).WithTimeout(ProvisioningTimeout).WithPolling(DefaultPollInterval).Should(Succeed())
+			"pod app=%s lacks PodScheduled=False/Reason=Unschedulable", appLabel)
+	}
+	Eventually(check).WithTimeout(ProvisioningTimeout).WithPolling(DefaultPollInterval).Should(Succeed(),
+		"pod app=%s did not reach Unschedulable", appLabel)
+	Consistently(check, duration, DefaultPollInterval).Should(Succeed(),
+		"pod app=%s did not remain Unschedulable for %s", appLabel, duration)
 }
 
 // ExpectNoNodeClaim asserts that no NodeClaim exists for nodePoolName.
-// Pairs with WaitForPodUnschedulable in negative tests to distinguish
+// Pairs with ConsistentlyExpectPendingPods in negative tests to distinguish
 // "Karpenter rejected this pod" (no NodeClaim ever created) from
 // "Karpenter accepted but launch is slow" (NodeClaim exists, pod still
 // Pending because the node hasn't joined yet).

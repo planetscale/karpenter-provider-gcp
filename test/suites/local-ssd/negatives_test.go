@@ -48,7 +48,7 @@ var _ = Describe("Local-SSD failure modes", func() {
 				gcpv1alpha1.LabelInstanceLocalSsdCount: "4", // z3-...-22 bundles 2; 4 has no match
 			}})
 		DeferCleanup(func(ctx context.Context) { env.DeleteDeployment(ctx, name) })
-		env.WaitForPodUnschedulable(ctx, name, 30*time.Second)
+		env.ConsistentlyExpectPendingPods(ctx, name, 30*time.Second)
 		env.ExpectNoNodeClaim(ctx, name)
 	}, SpecTimeout(10*time.Minute))
 
@@ -69,7 +69,7 @@ var _ = Describe("Local-SSD failure modes", func() {
 				gcpv1alpha1.LabelInstanceLocalSsdCount: "32",
 			}})
 		DeferCleanup(func(ctx context.Context) { env.DeleteDeployment(ctx, name) })
-		env.WaitForPodUnschedulable(ctx, name, 30*time.Second)
+		env.ConsistentlyExpectPendingPods(ctx, name, 30*time.Second)
 		env.ExpectNoNodeClaim(ctx, name)
 	}, SpecTimeout(10*time.Minute))
 
@@ -89,7 +89,7 @@ var _ = Describe("Local-SSD failure modes", func() {
 				gcpv1alpha1.LabelInstanceLocalSsdCount: "4",
 			}})
 		DeferCleanup(func(ctx context.Context) { env.DeleteDeployment(ctx, name) })
-		env.WaitForPodUnschedulable(ctx, name, 30*time.Second)
+		env.ConsistentlyExpectPendingPods(ctx, name, 30*time.Second)
 		env.ExpectNoNodeClaim(ctx, name)
 	}, SpecTimeout(10*time.Minute))
 
@@ -116,7 +116,7 @@ var _ = Describe("Local-SSD failure modes", func() {
 				gcpv1alpha1.LabelInstanceLocalSsdCount: "2",
 			}})
 		DeferCleanup(func(ctx context.Context) { env.DeleteDeployment(ctx, name) })
-		env.WaitForPodUnschedulable(ctx, name, 30*time.Second)
+		env.ConsistentlyExpectPendingPods(ctx, name, 30*time.Second)
 		env.ExpectNoNodeClaim(ctx, name)
 	}, SpecTimeout(10*time.Minute))
 
@@ -141,7 +141,7 @@ var _ = Describe("Local-SSD failure modes", func() {
 		env.CreateDeploymentWithOptions(ctx, name, name, name, karpv1.ArchitectureAmd64,
 			environment.DeploymentOptions{})
 		DeferCleanup(func(ctx context.Context) { env.DeleteDeployment(ctx, name) })
-		env.WaitForPodUnschedulable(ctx, name, 30*time.Second)
+		env.ConsistentlyExpectPendingPods(ctx, name, 30*time.Second)
 		env.ExpectNoNodeClaim(ctx, name)
 	}, SpecTimeout(10*time.Minute))
 
