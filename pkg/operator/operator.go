@@ -19,14 +19,10 @@ package operator
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"os"
 	"regexp"
 	"strings"
 
-	computev1 "cloud.google.com/go/compute/apiv1"
-	"cloud.google.com/go/compute/metadata"
-	containerapiv1 "cloud.google.com/go/container/apiv1"
 	"github.com/samber/lo"
 	"google.golang.org/api/compute/v1"
 	container "google.golang.org/api/container/v1"
@@ -36,13 +32,13 @@ import (
 	"sigs.k8s.io/karpenter/pkg/operator"
 
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/auth"
-	pkgcache "github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/cache"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/operator/options"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/gke"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/imagefamily"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/instance"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/instancetype"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/nodepooltemplate"
+	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/offerings/unavailableofferings"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/pricing"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/pricing/instanceprice"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/version"
@@ -55,10 +51,7 @@ func init() {
 type Operator struct {
 	*operator.Operator
 
-	Credential                auth.Credential
-	UnavailableOfferingsCache *pkgcache.UnavailableOfferings
-	MetadataClient            *metadata.Client
-	ZoneOperationClient       *computev1.ZoneOperationsClient
+	UnavailableOfferingsCache *unavailableofferings.UnavailableOfferings
 	ImagesProvider            imagefamily.Provider
 	NodePoolTemplateProvider  nodepooltemplate.Provider
 	PricingProvider           pricing.Provider
@@ -94,7 +87,6 @@ func NewOperator(ctx context.Context, operator *operator.Operator) (context.Cont
 	versionProvider := version.NewDefaultProvider(operator.KubernetesInterface)
 	nodeTemplateProvider := nodepooltemplate.NewDefaultProvider(
 		ctx,
-		operator.GetClient(),
 		computeService,
 		containerService,
 		options.FromContext(ctx).ClusterName,
@@ -120,19 +112,8 @@ func NewOperator(ctx context.Context, operator *operator.Operator) (context.Cont
 		os.Exit(1)
 	}
 
-	unavailableOfferingsCache := pkgcache.NewUnavailableOfferings()
-	metadataClient := metadata.NewClient(http.DefaultClient)
-	zoneOperationClient, err := computev1.NewZoneOperationsRESTClient(ctx)
-	if err != nil {
-		log.FromContext(ctx).Error(err, "Failed to create zone operation client")
-		os.Exit(1)
-	}
-	gkeClient, err := containerapiv1.NewClusterManagerClient(ctx)
-	if err != nil {
-		log.FromContext(ctx).Error(err, "failed to create gke client")
-		os.Exit(1)
-	}
-	gkeProvider := gke.NewDefaultProvider(gkeClient, computeService, containerService,
+	unavailableOfferingsCache := unavailableofferings.NewUnavailableOfferings()
+	gkeProvider := gke.NewDefaultProvider(computeService, containerService,
 		options.FromContext(ctx).ProjectID,
 		options.FromContext(ctx).NodeLocation,
 		options.FromContext(ctx).ClusterName,
@@ -165,10 +146,7 @@ func NewOperator(ctx context.Context, operator *operator.Operator) (context.Cont
 
 	return ctx, &Operator{
 		Operator:                  operator,
-		Credential:                auth,
 		UnavailableOfferingsCache: unavailableOfferingsCache,
-		MetadataClient:            metadataClient,
-		ZoneOperationClient:       zoneOperationClient,
 		ImagesProvider:            imageProvider,
 		NodePoolTemplateProvider:  nodeTemplateProvider,
 		PricingProvider:           pricingProvider,

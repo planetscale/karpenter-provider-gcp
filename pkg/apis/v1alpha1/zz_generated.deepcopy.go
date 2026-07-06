@@ -201,6 +201,11 @@ func (in *GCENodeClassSpec) DeepCopyInto(out *GCENodeClassSpec) {
 		*out = new(ShieldedInstanceConfig)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.ConfidentialInstanceType != nil {
+		in, out := &in.ConfidentialInstanceType, &out.ConfidentialInstanceType
+		*out = new(string)
+		**out = **in
+	}
 	if in.NetworkConfig != nil {
 		in, out := &in.NetworkConfig, &out.NetworkConfig
 		*out = new(NetworkConfig)
@@ -308,28 +313,28 @@ func (in *KubeletConfiguration) DeepCopyInto(out *KubeletConfiguration) {
 	}
 	if in.SystemReserved != nil {
 		in, out := &in.SystemReserved, &out.SystemReserved
-		*out = make(map[string]string, len(*in))
+		*out = make(map[string]KubeletQuantity, len(*in))
 		for key, val := range *in {
 			(*out)[key] = val
 		}
 	}
 	if in.KubeReserved != nil {
 		in, out := &in.KubeReserved, &out.KubeReserved
-		*out = make(map[string]string, len(*in))
+		*out = make(map[string]KubeletQuantity, len(*in))
 		for key, val := range *in {
 			(*out)[key] = val
 		}
 	}
 	if in.EvictionHard != nil {
 		in, out := &in.EvictionHard, &out.EvictionHard
-		*out = make(map[string]string, len(*in))
+		*out = make(map[string]KubeletQuantity, len(*in))
 		for key, val := range *in {
 			(*out)[key] = val
 		}
 	}
 	if in.EvictionSoft != nil {
 		in, out := &in.EvictionSoft, &out.EvictionSoft
-		*out = make(map[string]string, len(*in))
+		*out = make(map[string]KubeletQuantity, len(*in))
 		for key, val := range *in {
 			(*out)[key] = val
 		}

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -35,7 +36,7 @@ import (
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 	corev1 "k8s.io/api/core/v1"
-	apiresource "k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
@@ -43,8 +44,8 @@ import (
 	"sigs.k8s.io/karpenter/pkg/scheduling"
 
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/apis/v1alpha1"
-	pkgcache "github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/cache"
-	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/metadata"
+	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/metadata"
+	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/offerings/unavailableofferings"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/utils"
 )
 
@@ -117,7 +118,7 @@ func TestInsufficientCapacityBackoffTTLForOtherReasons(t *testing.T) {
 
 	ttl := insufficientCapacityBackoffTTL("ZONE_RESOURCE_POOL_EXHAUSTED")
 
-	require.Equal(t, pkgcache.UnavailableOfferingsTTL, ttl)
+	require.Equal(t, unavailableofferings.DefaultTTL, ttl)
 }
 
 // newFakeComputeProvider builds a DefaultProvider whose computeService targets a fake
@@ -142,6 +143,82 @@ func newFakeComputeProvider(t *testing.T, handler http.Handler) *DefaultProvider
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func metadataValue(meta *compute.Metadata, key string) string {
+	for _, item := range meta.Items {
+		if item.Key == key {
+			return ptr.Deref(item.Value, "")
+		}
+	}
+	return ""
+}
+
+const gpuTaintValue = "nvidia.com/gpu=present:NoSchedule"
+
+func TestSetupInstanceMetadata_RebuildsLabelsAndTaintsFromTarget(t *testing.T) {
+	p := &DefaultProvider{}
+	// Source template with bootstrap pool labels (dropped) and readiness gates (inherited).
+	const srcLabels = "cloud.google.com/gke-nodepool=bootstrap,workload=karpenter,max-pods-per-node=110," +
+		"node.kubernetes.io/masq-agent-ds-ready=true,cloud.google.com/gke-netd-ready=true," +
+		"addon.gke.io/node-local-dns-ds-ready=true,iam.gke.io/gke-metadata-server-enabled=true"
+	meta := &compute.Metadata{Items: []*compute.MetadataItems{
+		{Key: "kube-labels", Value: ptr.To(srcLabels)},
+		{Key: "kube-env", Value: ptr.To("KUBELET_ARGS: --v=2 --max-pods=110 --node-labels=" + srcLabels + " --register-with-taints=dedicated=karpenter:NoSchedule\n")},
+		{Key: "kubelet-config", Value: ptr.To("maxPods: 110\n")},
+	}}
+	maxPods := int32(32)
+	nodeClass := &v1alpha1.GCENodeClass{}
+	nodeClass.Name = "default"
+	nodeClass.Spec.KubeletConfiguration = &v1alpha1.KubeletConfiguration{MaxPods: &maxPods}
+	nodeClaim := &karpv1.NodeClaim{}
+	nodeClaim.Labels = map[string]string{karpv1.NodePoolLabelKey: "default"}
+	instanceType := &cloudprovider.InstanceType{
+		Name: "e2-standard-2",
+		Requirements: scheduling.NewRequirements(
+			scheduling.NewRequirement(corev1.LabelArchStable, corev1.NodeSelectorOpIn, "amd64"),
+			scheduling.NewRequirement(v1alpha1.LabelInstanceFamily, corev1.NodeSelectorOpIn, "e2"),
+		),
+		Overhead: &cloudprovider.InstanceTypeOverhead{KubeReserved: corev1.ResourceList{}},
+	}
+
+	patched, err := p.setupInstanceMetadata(context.Background(), meta, nodeClass, instanceType, nodeClaim, "europe-west4-c", karpv1.CapacityTypeOnDemand, false, 0)
+	require.NoError(t, err)
+
+	computeMetadata, err := patched.ToComputeMetadata()
+	require.NoError(t, err)
+	kubeLabels := metadataValue(computeMetadata, "kube-labels")
+	kubeEnv := metadataValue(computeMetadata, "kube-env")
+	require.NotContains(t, kubeLabels, "workload=karpenter")
+	require.NotContains(t, kubeEnv, "workload=karpenter")
+	require.NotContains(t, kubeEnv, "dedicated=karpenter:NoSchedule")
+	require.NotContains(t, kubeLabels, "cloud.google.com/gke-nodepool=bootstrap")
+	require.NotContains(t, kubeEnv, "cloud.google.com/gke-nodepool=bootstrap")
+	require.Contains(t, kubeLabels, "max-pods-per-node=32")
+	require.Contains(t, kubeEnv, "max-pods-per-node=32")
+	require.Contains(t, kubeEnv, "max-pods=32")
+	require.Contains(t, kubeLabels, "cloud.google.com/gke-os-distribution=cos")
+	require.Contains(t, kubeEnv, "cloud.google.com/gke-os-distribution=cos")
+	require.Contains(t, kubeLabels, karpv1.NodePoolLabelKey+"=default")
+	require.Contains(t, kubeLabels, v1alpha1.LabelNodeClass+"=default")
+	require.Contains(t, kubeLabels, v1alpha1.LabelGKEReadinessMasqAgentReady+"=true")
+	require.Contains(t, kubeLabels, v1alpha1.LabelGKEReadinessNetdReady+"=true")
+	require.Contains(t, kubeLabels, v1alpha1.LabelGKEReadinessNodeLocalDNSReady+"=true")
+	require.Contains(t, kubeLabels, v1alpha1.LabelGKEReadinessMetadataServerEnabled+"=true")
+	require.Contains(t, kubeEnv, v1alpha1.LabelGKEReadinessMasqAgentReady+"=true")
+	require.Contains(t, kubeEnv, v1alpha1.LabelGKEReadinessNetdReady+"=true")
+	require.Contains(t, kubeEnv, v1alpha1.LabelGKEReadinessNodeLocalDNSReady+"=true")
+	require.Contains(t, kubeEnv, v1alpha1.LabelGKEReadinessMetadataServerEnabled+"=true")
+	require.NotContains(t, kubeLabels, v1alpha1.LabelGKEReadinessKubeProxyReady)
+	require.NotContains(t, kubeEnv, v1alpha1.LabelGKEReadinessKubeProxyReady)
+	require.Contains(t, kubeLabels, karpv1.NodeRegisteredLabelKey+"=true")
+	require.NotContains(t, kubeEnv, karpv1.NodeRegisteredLabelKey+"=true")
+	require.Contains(t, kubeLabels, "gke-provisioning=standard")
+	require.Contains(t, kubeEnv, "gke-provisioning=standard")
+	require.Contains(t, kubeEnv, "ZONE: europe-west4-c")
+	require.NotContains(t, kubeEnv, "ZONE: europe-west4-a")
+	require.Contains(t, kubeEnv, "karpenter.sh/unregistered=true:NoExecute")
+	require.Equal(t, 1, strings.Count(kubeEnv, "--register-with-taints="))
 }
 
 func TestDelete_ReturnsNotFoundWhenInstanceMissing(t *testing.T) {
@@ -240,7 +317,7 @@ func TestSelectZone_OnDemandHonorsTopologyRequirement(t *testing.T) {
 		gkeProvider: &fakeGKEProvider{
 			zones: []string{"europe-west4-a", "europe-west4-b", "europe-west4-c"},
 		},
-		unavailableOfferings: pkgcache.NewUnavailableOfferings(),
+		unavailableOfferings: unavailableofferings.NewUnavailableOfferings(),
 	}
 
 	nodeClaim := &karpv1.NodeClaim{
@@ -280,7 +357,7 @@ func TestSelectZone_FailsWhenNoZonesMatchRequirement(t *testing.T) {
 		gkeProvider: &fakeGKEProvider{
 			zones: []string{"europe-west4-a", "europe-west4-c"},
 		},
-		unavailableOfferings: pkgcache.NewUnavailableOfferings(),
+		unavailableOfferings: unavailableofferings.NewUnavailableOfferings(),
 	}
 
 	nodeClaim := &karpv1.NodeClaim{
@@ -308,6 +385,9 @@ func TestSelectZone_FailsWhenNoZonesMatchRequirement(t *testing.T) {
 
 	_, err := p.selectZone(ctx, nodeClaim, instanceType, karpv1.CapacityTypeOnDemand)
 	require.Error(t, err)
+	require.Contains(t, err.Error(), `no zones match topology requirement "topology.kubernetes.io/zone"`)
+	require.Contains(t, err.Error(), "requested zones europe-west4-b")
+	require.Contains(t, err.Error(), "configured GKE cluster locations europe-west4-a,europe-west4-c")
 }
 
 func TestAdoptExistingInstance_PopulatesFieldsFromGCEInstance(t *testing.T) {
@@ -387,7 +467,7 @@ func TestSelectZone_SpotChoosesCheapestWithinTopologyRequirement(t *testing.T) {
 		gkeProvider: &fakeGKEProvider{
 			zones: []string{"europe-west4-a", "europe-west4-b"},
 		},
-		unavailableOfferings: pkgcache.NewUnavailableOfferings(),
+		unavailableOfferings: unavailableofferings.NewUnavailableOfferings(),
 	}
 
 	nodeClaim := &karpv1.NodeClaim{
@@ -430,7 +510,7 @@ func TestSelectZone_OnDemandSkipsUnavailableZones(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	uo := pkgcache.NewUnavailableOfferings()
+	uo := unavailableofferings.NewUnavailableOfferings()
 	uo.MarkUnavailable(ctx, "ICE", "n2-standard-4", "europe-west4-a", karpv1.CapacityTypeOnDemand)
 	uo.MarkUnavailable(ctx, "ICE", "n2-standard-4", "europe-west4-c", karpv1.CapacityTypeOnDemand)
 
@@ -458,7 +538,7 @@ func TestSelectZone_OnDemandReturnsICEWhenAllZonesUnavailable(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	uo := pkgcache.NewUnavailableOfferings()
+	uo := unavailableofferings.NewUnavailableOfferings()
 	for _, z := range []string{"europe-west4-a", "europe-west4-b", "europe-west4-c"} {
 		uo.MarkUnavailable(ctx, "ICE", "n2-standard-4", z, karpv1.CapacityTypeOnDemand)
 	}
@@ -481,7 +561,7 @@ func TestSelectZone_SpotSkipsUnavailableZones(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	uo := pkgcache.NewUnavailableOfferings()
+	uo := unavailableofferings.NewUnavailableOfferings()
 	uo.MarkUnavailable(ctx, "ICE", "n2-standard-4", "europe-west4-a", karpv1.CapacityTypeSpot)
 
 	p := &DefaultProvider{
@@ -511,7 +591,7 @@ func TestSelectZone_SpotReturnsICEWhenAllZonesUnavailable(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	uo := pkgcache.NewUnavailableOfferings()
+	uo := unavailableofferings.NewUnavailableOfferings()
 	for _, z := range []string{"europe-west4-a", "europe-west4-b"} {
 		uo.MarkUnavailable(ctx, "ICE", "n2-standard-4", z, karpv1.CapacityTypeSpot)
 	}
@@ -1118,19 +1198,11 @@ func TestBuildInstance_UsesExternalCapacityTypeNotRecomputed(t *testing.T) {
 		Overhead: &cloudprovider.InstanceTypeOverhead{KubeReserved: corev1.ResourceList{}},
 	}
 
-	template := &compute.InstanceTemplate{
-		Properties: &compute.InstanceProperties{
-			Scheduling:        &compute.Scheduling{},
-			NetworkInterfaces: []*compute.NetworkInterface{},
-			Metadata: &compute.Metadata{
-				Items: []*compute.MetadataItems{
-					{Key: "kube-labels", Value: ptr.To("max-pods-per-node=110,max-pods=110")},
-					{Key: "kube-env", Value: ptr.To("KUBELET_ARGS: --max-pods=110\narch=amd64\n")},
-					{Key: "kubelet-config", Value: ptr.To("nodeStatusUpdateFrequency: 10s\n")},
-				},
-			},
-		},
-	}
+	sourceMetadata := computeMetadataValues(map[string]string{
+		metadata.KubeLabelsKey:    "max-pods-per-node=110,max-pods=110",
+		metadata.KubeEnvKey:       "KUBELET_ARGS: --max-pods=110 --node-labels=max-pods-per-node=110,max-pods=110\narch=amd64\n",
+		metadata.KubeletConfigKey: "nodeStatusUpdateFrequency: 10s\n",
+	})
 
 	cluster := makeCluster("projects/p/global/networks/my-vpc", "regions/us-central1/subnetworks/my-subnet", "pods", false)
 	instance, err := p.buildInstance(
@@ -1138,9 +1210,9 @@ func TestBuildInstance_UsesExternalCapacityTypeNotRecomputed(t *testing.T) {
 		spotOrOnDemandNodeClaim(),
 		&v1alpha1.GCENodeClass{},
 		onDemandOnlyIT,
-		template,
+		sourceMetadata,
 		cluster,
-		"default-pool", "us-central1-a", "karpenter-test",
+		"us-central1-a", "karpenter-test",
 		karpv1.CapacityTypeSpot, // externally decided by Create() — must not be recomputed
 		nil, 0,
 	)
@@ -1202,19 +1274,11 @@ func TestBuildInstance_GPUTaintInjected(t *testing.T) {
 		Overhead: &cloudprovider.InstanceTypeOverhead{KubeReserved: corev1.ResourceList{}},
 	}
 
-	template := &compute.InstanceTemplate{
-		Properties: &compute.InstanceProperties{
-			Scheduling:        &compute.Scheduling{},
-			NetworkInterfaces: []*compute.NetworkInterface{},
-			Metadata: &compute.Metadata{
-				Items: []*compute.MetadataItems{
-					{Key: "kube-labels", Value: ptr.To("max-pods-per-node=110,max-pods=110")},
-					{Key: "kube-env", Value: ptr.To("KUBELET_ARGS: --max-pods=110 --node-labels=max-pods-per-node=110,max-pods=110\ngke-provisioning=standard\n")},
-					{Key: "kubelet-config", Value: ptr.To("nodeStatusUpdateFrequency: 10s\n")},
-				},
-			},
-		},
-	}
+	sourceMetadata := computeMetadataValues(map[string]string{
+		metadata.KubeLabelsKey:    "max-pods-per-node=110,max-pods=110",
+		metadata.KubeEnvKey:       "KUBELET_ARGS: --max-pods=110 --node-labels=max-pods-per-node=110,max-pods=110\ngke-provisioning=standard\n",
+		metadata.KubeletConfigKey: "nodeStatusUpdateFrequency: 10s\n",
+	})
 
 	nc := &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{AutoGPUTaint: true}}
 	cluster := makeCluster("net", "subnet", "pods", false)
@@ -1223,9 +1287,9 @@ func TestBuildInstance_GPUTaintInjected(t *testing.T) {
 		spotOrOnDemandNodeClaim(),
 		nc,
 		gpuIT,
-		template,
+		sourceMetadata,
 		cluster,
-		"default-pool", "us-central1-a", "karpenter-gpu-test",
+		"us-central1-a", "karpenter-gpu-test",
 		karpv1.CapacityTypeOnDemand,
 		nil, 0,
 	)
@@ -1239,7 +1303,11 @@ func TestBuildInstance_GPUTaintInjected(t *testing.T) {
 			break
 		}
 	}
-	require.Contains(t, kubeEnv, metadata.GPUTaintArg, "GPU taint must be present in kube-env when AutoGPUTaint=true")
+	require.Contains(t, kubeEnv, UnregisteredTaintValue, "unregistered taint must remain in kube-env")
+	require.Contains(t, kubeEnv, gpuTaintValue, "GPU taint must be present in kube-env when AutoGPUTaint=true")
+	require.Equal(t, 1, strings.Count(kubeEnv, UnregisteredTaintValue), "unregistered taint must appear exactly once")
+	require.Equal(t, 1, strings.Count(kubeEnv, gpuTaintValue), "GPU taint must appear exactly once")
+	require.Equal(t, 1, strings.Count(kubeEnv, "--register-with-taints="), "taints must be merged into exactly one flag")
 }
 
 func TestBuildInstance_GPUTaintNotInjectedWhenDisabled(t *testing.T) {
@@ -1261,19 +1329,11 @@ func TestBuildInstance_GPUTaintNotInjectedWhenDisabled(t *testing.T) {
 		Overhead: &cloudprovider.InstanceTypeOverhead{KubeReserved: corev1.ResourceList{}},
 	}
 
-	template := &compute.InstanceTemplate{
-		Properties: &compute.InstanceProperties{
-			Scheduling:        &compute.Scheduling{},
-			NetworkInterfaces: []*compute.NetworkInterface{},
-			Metadata: &compute.Metadata{
-				Items: []*compute.MetadataItems{
-					{Key: "kube-labels", Value: ptr.To("max-pods-per-node=110,max-pods=110")},
-					{Key: "kube-env", Value: ptr.To("KUBELET_ARGS: --max-pods=110 --node-labels=max-pods-per-node=110,max-pods=110\ngke-provisioning=standard\n")},
-					{Key: "kubelet-config", Value: ptr.To("nodeStatusUpdateFrequency: 10s\n")},
-				},
-			},
-		},
-	}
+	sourceMetadata := computeMetadataValues(map[string]string{
+		metadata.KubeLabelsKey:    "max-pods-per-node=110,max-pods=110",
+		metadata.KubeEnvKey:       "KUBELET_ARGS: --max-pods=110 --node-labels=max-pods-per-node=110,max-pods=110\ngke-provisioning=standard\n",
+		metadata.KubeletConfigKey: "nodeStatusUpdateFrequency: 10s\n",
+	})
 
 	nc := &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{AutoGPUTaint: false}}
 	cluster := makeCluster("net", "subnet", "pods", false)
@@ -1282,93 +1342,33 @@ func TestBuildInstance_GPUTaintNotInjectedWhenDisabled(t *testing.T) {
 		spotOrOnDemandNodeClaim(),
 		nc,
 		gpuIT,
-		template,
+		sourceMetadata,
 		cluster,
-		"default-pool", "us-central1-a", "karpenter-gpu-test",
+		"us-central1-a", "karpenter-gpu-test",
 		karpv1.CapacityTypeOnDemand,
 		nil, 0,
 	)
 
 	require.NoError(t, err)
 	require.NotNil(t, instance)
-	var kubeEnv string
-	for _, item := range instance.Metadata.Items {
-		if item.Key == "kube-env" {
-			kubeEnv = ptr.Deref(item.Value, "")
-			break
-		}
-	}
-	require.NotContains(t, kubeEnv, metadata.GPUTaintArg, "GPU taint must not be present when AutoGPUTaint=false")
+	kubeEnv := kubeEnvFrom(t, instance)
+	require.Contains(t, kubeEnv, UnregisteredTaintValue, "unregistered taint must remain in kube-env")
+	require.NotContains(t, kubeEnv, gpuTaintValue, "GPU taint must not be present when AutoGPUTaint=false")
+	require.Equal(t, 1, strings.Count(kubeEnv, UnregisteredTaintValue), "unregistered taint must appear exactly once")
+	require.Equal(t, 1, strings.Count(kubeEnv, "--register-with-taints="), "taints must be merged into exactly one flag")
 }
 
-func TestBuildInstance_GPUTaintInjected_AttachedGPU(t *testing.T) {
-	t.Parallel()
-
-	p := makeProvider()
-
-	// Non-GPU instance type (no LabelInstanceGPUCount requirement)
-	nonGPUIT := &cloudprovider.InstanceType{
-		Name: "n1-standard-4",
-		Offerings: cloudprovider.Offerings{
-			{Available: true, Requirements: scheduling.NewRequirements(
-				scheduling.NewRequirement(karpv1.CapacityTypeLabelKey, corev1.NodeSelectorOpIn, karpv1.CapacityTypeOnDemand),
-			)},
-		},
-		Requirements: scheduling.NewRequirements(
-			scheduling.NewRequirement(corev1.LabelArchStable, corev1.NodeSelectorOpIn, "amd64"),
-		),
-		Overhead: &cloudprovider.InstanceTypeOverhead{KubeReserved: corev1.ResourceList{}},
+func computeMetadataValues(values map[string]string) *compute.Metadata {
+	items := make([]*compute.MetadataItems, 0, len(values))
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
 	}
-
-	// Template carries attached accelerators (T4), which triggers isGPUInstance
-	template := &compute.InstanceTemplate{
-		Properties: &compute.InstanceProperties{
-			Scheduling:        &compute.Scheduling{},
-			NetworkInterfaces: []*compute.NetworkInterface{},
-			GuestAccelerators: []*compute.AcceleratorConfig{
-				{AcceleratorType: "nvidia-tesla-t4", AcceleratorCount: 1},
-			},
-			Metadata: &compute.Metadata{
-				Items: []*compute.MetadataItems{
-					{Key: "kube-labels", Value: ptr.To("max-pods-per-node=110,max-pods=110")},
-					{Key: "kube-env", Value: ptr.To("KUBELET_ARGS: --max-pods=110 --node-labels=max-pods-per-node=110,max-pods=110\ngke-provisioning=standard\n")},
-					{Key: "kubelet-config", Value: ptr.To("nodeStatusUpdateFrequency: 10s\n")},
-				},
-			},
-		},
+	sort.Strings(keys)
+	for _, key := range keys {
+		items = append(items, &compute.MetadataItems{Key: key, Value: ptr.To(values[key])})
 	}
-
-	nc := &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{AutoGPUTaint: true}}
-	cluster := makeCluster("net", "subnet", "pods", false)
-	instance, err := p.buildInstance(
-		context.Background(),
-		spotOrOnDemandNodeClaim(),
-		nc,
-		nonGPUIT,
-		template,
-		cluster,
-		"default-pool", "us-central1-a", "karpenter-gpu-test",
-		karpv1.CapacityTypeOnDemand,
-		nil, 0,
-	)
-
-	require.NoError(t, err)
-	require.NotNil(t, instance)
-	var kubeEnv, kubeLabels string
-	for _, item := range instance.Metadata.Items {
-		switch item.Key {
-		case "kube-env":
-			kubeEnv = ptr.Deref(item.Value, "")
-		case "kube-labels":
-			kubeLabels = ptr.Deref(item.Value, "")
-		}
-	}
-	require.Contains(t, kubeEnv, metadata.GPUTaintArg, "GPU taint must be injected when GuestAccelerators present and AutoGPUTaint=true")
-	// Driver-version label applies to all GPU nodes, including attached-GPU instances.
-	require.Contains(t, kubeEnv, "gke-gpu-driver-version=default", "driver-version label must be set for attached-GPU nodes")
-	// No accelerator label: nonGPUIT has no LabelGKEAccelerator requirement, so gpuName resolves
-	// to "" via direct map access and SetGPUAcceleratorLabel must not be called.
-	require.NotContains(t, kubeLabels, "gke-accelerator=", "attached-GPU instance type without LabelGKEAccelerator must not get a bogus accelerator label")
+	return &compute.Metadata{Items: items}
 }
 
 func makeProvider() *DefaultProvider {
@@ -1388,26 +1388,19 @@ func makeGPUIT() *cloudprovider.InstanceType {
 			scheduling.NewRequirement(v1alpha1.LabelInstanceGPUCount, corev1.NodeSelectorOpIn, "1"),
 			scheduling.NewRequirement(v1alpha1.LabelGKEAccelerator, corev1.NodeSelectorOpIn, "nvidia-l4"),
 		),
+		Capacity: corev1.ResourceList{
+			corev1.ResourceCPU: resource.MustParse("4"),
+		},
 		Overhead: &cloudprovider.InstanceTypeOverhead{KubeReserved: corev1.ResourceList{}},
 	}
 }
 
-func makeGPUTemplate(kubeLabels string) *compute.InstanceTemplate {
-	return &compute.InstanceTemplate{
-		Properties: &compute.InstanceProperties{
-			Scheduling:        &compute.Scheduling{},
-			NetworkInterfaces: []*compute.NetworkInterface{},
-			Metadata: &compute.Metadata{
-				Items: []*compute.MetadataItems{
-					{Key: "kube-labels", Value: ptr.To(kubeLabels)},
-					// kube-env mirrors kube-labels: KUBELET_ARGS carries the same labels in --node-labels=,
-					// which is the canonical path GKE COS uses to pass labels to kubelet.
-					{Key: "kube-env", Value: ptr.To("KUBELET_ARGS: --max-pods=110 --node-labels=" + kubeLabels + "\ngke-provisioning=standard\n")},
-					{Key: "kubelet-config", Value: ptr.To("nodeStatusUpdateFrequency: 10s\n")},
-				},
-			},
-		},
-	}
+func makeSourceMetadata(kubeLabels string) *compute.Metadata {
+	return computeMetadataValues(map[string]string{
+		metadata.KubeLabelsKey:    kubeLabels,
+		metadata.KubeEnvKey:       "KUBELET_ARGS: --max-pods=110 --node-labels=" + kubeLabels + "\ngke-provisioning=standard\n",
+		metadata.KubeletConfigKey: "nodeStatusUpdateFrequency: 10s\n",
+	})
 }
 
 func kubeLabelsFrom(t *testing.T, instance *compute.Instance) string {
@@ -1432,6 +1425,121 @@ func kubeEnvFrom(t *testing.T, instance *compute.Instance) string {
 	return ""
 }
 
+func metadataKeys(instance *compute.Instance) []string {
+	keys := make([]string, 0, len(instance.Metadata.Items))
+	for _, item := range instance.Metadata.Items {
+		keys = append(keys, item.Key)
+	}
+	return keys
+}
+
+func TestBuildInstance_SortsMetadataAfterAllPatches(t *testing.T) {
+	t.Parallel()
+
+	sourceMetadata := makeSourceMetadata("z-label=last,max-pods-per-node=110,max-pods=110")
+	sourceMetadata.Items = append(sourceMetadata.Items,
+		&compute.MetadataItems{Key: "zz-template", Value: ptr.To("last")},
+		&compute.MetadataItems{Key: "aa-template", Value: ptr.To("first")},
+	)
+	nodeClass := &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{Metadata: map[string]string{
+		"yy-custom": "last-custom",
+		"bb-custom": "first-custom",
+	}}}
+
+	instance, err := makeProvider().buildInstance(
+		context.Background(),
+		spotOrOnDemandNodeClaim(), nodeClass, makeNonGPUIT(), sourceMetadata,
+		makeCluster("projects/p/global/networks/my-vpc", "regions/us-central1/subnetworks/my-subnet", "pods", false),
+		"us-central1-a", "karpenter-sort-test",
+		karpv1.CapacityTypeOnDemand,
+		nil, 0,
+	)
+	require.NoError(t, err)
+
+	got := metadataKeys(instance)
+	want := append([]string(nil), got...)
+	sort.Strings(want)
+	require.Equal(t, want, got)
+}
+
+func TestBuildInstance_DiskTypeLabels(t *testing.T) {
+	t.Parallel()
+
+	p := makeProvider()
+	instanceType := &cloudprovider.InstanceType{
+		Name: "e2-standard-4",
+		Offerings: cloudprovider.Offerings{
+			{Available: true, Requirements: scheduling.NewRequirements(
+				scheduling.NewRequirement(karpv1.CapacityTypeLabelKey, corev1.NodeSelectorOpIn, karpv1.CapacityTypeOnDemand),
+			)},
+		},
+		Requirements: scheduling.NewRequirements(
+			scheduling.NewRequirement(corev1.LabelArchStable, corev1.NodeSelectorOpIn, "amd64"),
+			scheduling.NewRequirement(v1alpha1.LabelInstanceFamily, corev1.NodeSelectorOpIn, "e2"),
+		),
+		Overhead: &cloudprovider.InstanceTypeOverhead{KubeReserved: corev1.ResourceList{}},
+	}
+
+	kubeLabels := "max-pods-per-node=110,max-pods=110,cloud.google.com/machine-family=n2,disk-type.gke.io/hyperdisk-throughput=true,disk-type.gke.io/pd-standard=true"
+	sourceMetadata := makeSourceMetadata(kubeLabels)
+	nodeClass := &v1alpha1.GCENodeClass{}
+	cluster := makeCluster("projects/p/global/networks/my-vpc", "regions/us-central1/subnetworks/my-subnet", "pods", false)
+
+	instance, err := p.buildInstance(
+		context.Background(),
+		spotOrOnDemandNodeClaim(),
+		nodeClass,
+		instanceType,
+		sourceMetadata,
+		cluster,
+		"us-central1-a", "karpenter-disk-label-test",
+		karpv1.CapacityTypeOnDemand,
+		nil, 0,
+	)
+
+	require.NoError(t, err)
+	for _, value := range []string{kubeLabelsFrom(t, instance), kubeEnvFrom(t, instance)} {
+		require.Contains(t, value, "cloud.google.com/machine-family=e2")
+		require.Contains(t, value, "disk-type.gke.io/pd-balanced=true")
+		require.Contains(t, value, "disk-type.gke.io/pd-extreme=true")
+		require.Contains(t, value, "disk-type.gke.io/pd-ssd=true")
+		require.Contains(t, value, "disk-type.gke.io/pd-standard=true")
+		require.NotContains(t, value, "disk-type.gke.io/hyperdisk-throughput=true")
+	}
+}
+
+func TestBuildInstance_RebuildsGCELabelsWithoutTemplateIdentityLabelInheritance(t *testing.T) {
+	t.Parallel()
+
+	p := makeProvider()
+	sourceMetadata := makeSourceMetadata("max-pods-per-node=110")
+	nodeClass := &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{Labels: map[string]string{"user-label": "value"}}}
+	instance, err := p.buildInstance(
+		context.Background(),
+		spotOrOnDemandNodeClaim(), nodeClass, makeGPUIT(), sourceMetadata,
+		makeCluster("net", "subnet", "pods", false),
+		"us-central1-a", "karpenter-identity-test",
+		karpv1.CapacityTypeOnDemand,
+		nil, 0,
+	)
+
+	require.NoError(t, err)
+	require.Equal(t, "value", instance.Labels["user-label"])
+	require.Equal(t, "aerukz4jvpg66ajdivtytk6n54asgrlhrgv433ybencwpcnlzxxq", instance.Labels["goog-gke-cluster-id-base32"])
+	require.Contains(t, instance.Labels, "goog-gke-cost-management")
+	require.Equal(t, "", instance.Labels["goog-gke-cost-management"])
+	require.Contains(t, instance.Labels, "goog-gke-node")
+	require.Equal(t, "", instance.Labels["goog-gke-node"])
+	require.Equal(t, "on-demand", instance.Labels["goog-gke-node-pool-provisioning-model"])
+	require.Equal(t, spotOrOnDemandNodeClaim().Labels[karpv1.NodePoolLabelKey], instance.Labels[utils.SanitizeGCELabelValue(utils.LabelNodePoolKey)])
+	require.Equal(t, nodeClass.Name, instance.Labels[utils.SanitizeGCELabelValue(utils.LabelGCENodeClassKey)])
+	require.Equal(t, p.clusterName, instance.Labels[utils.SanitizeGCELabelValue(utils.LabelClusterNameKey)])
+	require.Equal(t, p.clusterLocation, instance.Labels[utils.SanitizeGCELabelValue(utils.LabelClusterLocationKey)])
+	require.NotEqual(t, "source-cluster-id", instance.Labels["goog-gke-cluster-id-base32"])
+	require.NotContains(t, instance.Labels, "goog-k8s-node-pool-name")
+	require.NotContains(t, instance.Labels, "workload-label-from-bootstrap-pool")
+}
+
 func TestBuildInstance_GPUDriverVersionLabel(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1451,9 +1559,9 @@ func TestBuildInstance_GPUDriverVersionLabel(t *testing.T) {
 			nc := &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{GPUDriverVersion: tc.version}}
 			instance, err := p.buildInstance(
 				context.Background(),
-				spotOrOnDemandNodeClaim(), nc, makeGPUIT(), makeGPUTemplate("max-pods-per-node=110"),
+				spotOrOnDemandNodeClaim(), nc, makeGPUIT(), makeSourceMetadata("max-pods-per-node=110"),
 				makeCluster("net", "subnet", "pods", false),
-				"default-pool", "us-central1-a", "karpenter-gpu-test",
+				"us-central1-a", "karpenter-gpu-test",
 				karpv1.CapacityTypeOnDemand,
 				nil, 0,
 			)
@@ -1462,9 +1570,17 @@ func TestBuildInstance_GPUDriverVersionLabel(t *testing.T) {
 			ke := kubeEnvFrom(t, instance)
 			require.Contains(t, kl, "cloud.google.com/gke-gpu-driver-version="+tc.wantVersion)
 			require.Contains(t, kl, "cloud.google.com/gke-accelerator=nvidia-l4")
+			require.Contains(t, kl, "cloud.google.com/gke-cpu-scaling-level=4")
+			require.Equal(t, 1, strings.Count(kl, "gke-gpu-driver-version="))
+			require.Equal(t, 1, strings.Count(kl, "gke-accelerator="))
+			require.Equal(t, 1, strings.Count(kl, "gke-cpu-scaling-level="))
 			// kube-env --node-labels is the canonical kubelet label source.
 			require.Contains(t, ke, "cloud.google.com/gke-gpu-driver-version="+tc.wantVersion)
 			require.Contains(t, ke, "cloud.google.com/gke-accelerator=nvidia-l4")
+			require.Contains(t, ke, "cloud.google.com/gke-cpu-scaling-level=4")
+			require.Equal(t, 1, strings.Count(ke, "gke-gpu-driver-version="))
+			require.Equal(t, 1, strings.Count(ke, "gke-accelerator="))
+			require.Equal(t, 1, strings.Count(ke, "gke-cpu-scaling-level="))
 		})
 	}
 }
@@ -1490,9 +1606,9 @@ func TestBuildInstance_GPUDriverVersionNotInjectedForNonGPU(t *testing.T) {
 	nc := &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{GPUDriverVersion: "default"}}
 	instance, err := p.buildInstance(
 		context.Background(),
-		spotOrOnDemandNodeClaim(), nc, nonGPUIT, makeGPUTemplate("max-pods-per-node=110"),
+		spotOrOnDemandNodeClaim(), nc, nonGPUIT, makeSourceMetadata("max-pods-per-node=110"),
 		makeCluster("net", "subnet", "pods", false),
-		"default-pool", "us-central1-a", "karpenter-test",
+		"us-central1-a", "karpenter-test",
 		karpv1.CapacityTypeOnDemand,
 		nil, 0,
 	)
@@ -1512,9 +1628,9 @@ func TestBuildInstance_GPUDriverVersionOverridesTemplate(t *testing.T) {
 	instance, err := p.buildInstance(
 		context.Background(),
 		spotOrOnDemandNodeClaim(), nc, makeGPUIT(),
-		makeGPUTemplate("max-pods-per-node=110,cloud.google.com/gke-gpu-driver-version=default"),
+		makeSourceMetadata("max-pods-per-node=110,cloud.google.com/gke-gpu-driver-version=default"),
 		makeCluster("net", "subnet", "pods", false),
-		"default-pool", "us-central1-a", "karpenter-gpu-test",
+		"us-central1-a", "karpenter-gpu-test",
 		karpv1.CapacityTypeOnDemand,
 		nil, 0,
 	)
@@ -1549,9 +1665,9 @@ func TestBuildInstance_NodePoolLabelDoesNotOverrideGPUDriverAtBootTime(t *testin
 	nc := &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{GPUDriverVersion: "default"}}
 	instance, err := p.buildInstance(
 		context.Background(),
-		nodeClaim, nc, makeGPUIT(), makeGPUTemplate("max-pods-per-node=110"),
+		nodeClaim, nc, makeGPUIT(), makeSourceMetadata("max-pods-per-node=110"),
 		makeCluster("net", "subnet", "pods", false),
-		"default-pool", "us-central1-a", "karpenter-gpu-test",
+		"us-central1-a", "karpenter-gpu-test",
 		karpv1.CapacityTypeOnDemand,
 		nil, 0,
 	)
@@ -1581,11 +1697,49 @@ func TestSetupInstanceLabels_StampsClusterLocation(t *testing.T) {
 	p := &DefaultProvider{clusterName: "my-cluster", clusterLocation: "us-central1-f"}
 	inst, nodeClaim, nodeClass := instanceLabelsFixture()
 
-	p.setupInstanceLabels(inst, nodeClaim, nodeClass, amd64InstanceType())
+	p.setupInstanceLabels(inst, nodeClaim, nodeClass, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 
 	locationKey := utils.SanitizeGCELabelValue(utils.LabelClusterLocationKey)
 	require.Equal(t, "us-central1-f", inst.Labels[locationKey],
 		"cluster location must be stamped on the instance label %q", locationKey)
+}
+
+func TestBuildInstance_DoesNotCopyKubernetesSchedulingLabelsToGCELabels(t *testing.T) {
+	t.Parallel()
+
+	p := makeProvider()
+	nodeClass := &v1alpha1.GCENodeClass{}
+	nodeClass.Name = "default"
+	instanceType := &cloudprovider.InstanceType{
+		Name: "n2-standard-2",
+		Requirements: scheduling.NewRequirements(
+			scheduling.NewRequirement(corev1.LabelArchStable, corev1.NodeSelectorOpIn, "amd64"),
+			scheduling.NewRequirement(corev1.LabelOSStable, corev1.NodeSelectorOpIn, "linux"),
+			scheduling.NewRequirement(corev1.LabelInstanceTypeStable, corev1.NodeSelectorOpIn, "n2-standard-2"),
+			scheduling.NewRequirement(corev1.LabelTopologyZone, corev1.NodeSelectorOpIn, "us-central1-f"),
+			scheduling.NewRequirement(v1alpha1.LabelInstanceFamily, corev1.NodeSelectorOpIn, "n2"),
+		),
+		Overhead: &cloudprovider.InstanceTypeOverhead{KubeReserved: corev1.ResourceList{}},
+	}
+	instance, err := p.buildInstance(
+		context.Background(),
+		spotOrOnDemandNodeClaim(), nodeClass, instanceType, makeSourceMetadata("max-pods-per-node=110"),
+		makeCluster("net", "subnet", "pods", false),
+		"us-central1-f", "karpenter-no-label-leak",
+		karpv1.CapacityTypeOnDemand,
+		nil, 0,
+	)
+
+	require.NoError(t, err)
+	for _, key := range []string{
+		corev1.LabelArchStable,
+		corev1.LabelOSStable,
+		corev1.LabelInstanceTypeStable,
+		corev1.LabelTopologyZone,
+		v1alpha1.LabelInstanceFamily,
+	} {
+		require.NotContains(t, instance.Labels, utils.SanitizeGCELabelValue(key), "Kubernetes node label %q must not be copied to GCE instance labels", key)
+	}
 }
 
 func TestSetupInstanceLabels_ClusterNameNotOverwrittenByRequirements(t *testing.T) {
@@ -1593,14 +1747,7 @@ func TestSetupInstanceLabels_ClusterNameNotOverwrittenByRequirements(t *testing.
 
 	p := &DefaultProvider{clusterName: "real-cluster", clusterLocation: "us-central1-f"}
 	inst, nodeClaim, nodeClass := instanceLabelsFixture()
-	it := &cloudprovider.InstanceType{
-		Requirements: scheduling.NewRequirements(
-			scheduling.NewRequirement(corev1.LabelArchStable, corev1.NodeSelectorOpIn, "amd64"),
-			scheduling.NewRequirement(utils.LabelClusterNameKey, corev1.NodeSelectorOpIn, "attacker-cluster"),
-		),
-	}
-
-	p.setupInstanceLabels(inst, nodeClaim, nodeClass, it)
+	p.setupInstanceLabels(inst, nodeClaim, nodeClass, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 
 	nameKey := utils.SanitizeGCELabelValue(utils.LabelClusterNameKey)
 	require.Equal(t, "real-cluster", inst.Labels[nameKey],
@@ -1612,14 +1759,7 @@ func TestSetupInstanceLabels_ClusterLocationNotOverwrittenByRequirements(t *test
 
 	p := &DefaultProvider{clusterName: "my-cluster", clusterLocation: "us-central1-f"}
 	inst, nodeClaim, nodeClass := instanceLabelsFixture()
-	it := &cloudprovider.InstanceType{
-		Requirements: scheduling.NewRequirements(
-			scheduling.NewRequirement(corev1.LabelArchStable, corev1.NodeSelectorOpIn, "amd64"),
-			scheduling.NewRequirement(utils.LabelClusterLocationKey, corev1.NodeSelectorOpIn, "attacker-region"),
-		),
-	}
-
-	p.setupInstanceLabels(inst, nodeClaim, nodeClass, it)
+	p.setupInstanceLabels(inst, nodeClaim, nodeClass, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 
 	locationKey := utils.SanitizeGCELabelValue(utils.LabelClusterLocationKey)
 	require.Equal(t, "us-central1-f", inst.Labels[locationKey],
@@ -1924,7 +2064,7 @@ func makeVariant(name string, odPrice float64, ssdCount int, ephemeralGiB int64)
 	}
 	cap := corev1.ResourceList{}
 	if ephemeralGiB > 0 {
-		cap[corev1.ResourceEphemeralStorage] = *apiresource.NewQuantity(ephemeralGiB*1024*1024*1024, apiresource.BinarySI)
+		cap[corev1.ResourceEphemeralStorage] = *resource.NewQuantity(ephemeralGiB*1024*1024*1024, resource.BinarySI)
 	}
 	return &cloudprovider.InstanceType{
 		Name:         name,
@@ -2090,4 +2230,83 @@ func TestOrderInstanceTypesByPrice_DistinctMachineTypes(t *testing.T) {
 	}
 	require.Equal(t, []string{"n2-standard-4", "n2-standard-4", "n2d-standard-8", "n2d-standard-8"}, names)
 	require.Equal(t, []int{0, 2, 0, 4}, counts)
+}
+
+// makeNonGPUIT returns a minimal on-demand instance type with no GPUs,
+// suitable for testing Confidential VM wiring without triggering the GPU
+// TERMINATE override. The GPU-count requirement is declared DoesNotExist,
+// mirroring the instancetype builder — omitting the key entirely would make
+// Requirements.Get return a complement requirement that reads as GPU-present.
+func makeNonGPUIT() *cloudprovider.InstanceType {
+	return &cloudprovider.InstanceType{
+		Name: "n2-standard-4",
+		Offerings: cloudprovider.Offerings{
+			{Available: true, Requirements: scheduling.NewRequirements(
+				scheduling.NewRequirement(karpv1.CapacityTypeLabelKey, corev1.NodeSelectorOpIn, karpv1.CapacityTypeOnDemand),
+			)},
+		},
+		Requirements: scheduling.NewRequirements(
+			scheduling.NewRequirement(corev1.LabelArchStable, corev1.NodeSelectorOpIn, "amd64"),
+			scheduling.NewRequirement(v1alpha1.LabelInstanceGPUCount, corev1.NodeSelectorOpDoesNotExist),
+		),
+		Overhead: &cloudprovider.InstanceTypeOverhead{KubeReserved: corev1.ResourceList{}},
+	}
+}
+
+// buildConfidentialInstance is a test helper that calls buildInstance with a
+// minimal on-demand, non-GPU setup, so only the Confidential block is exercised.
+func buildConfidentialInstance(t *testing.T, nc *v1alpha1.GCENodeClass) *compute.Instance {
+	t.Helper()
+	p := makeProvider()
+	instance, err := p.buildInstance(
+		context.Background(),
+		onDemandNodeClaim(),
+		nc,
+		makeNonGPUIT(),
+		makeSourceMetadata("max-pods-per-node=110"),
+		makeCluster("projects/p/global/networks/my-vpc", "regions/us-central1/subnetworks/my-subnet", "pods", false),
+		"us-central1-a", "karpenter-confidential-test",
+		karpv1.CapacityTypeOnDemand,
+		nil, 0,
+	)
+	require.NoError(t, err)
+	return instance
+}
+
+func TestConfidentialInstanceType(t *testing.T) {
+	t.Parallel()
+
+	sev, sevSNP := "SEV", "SEV_SNP"
+	cases := []struct {
+		name string
+		typ  *string
+	}{
+		{name: "unset"},
+		{name: "SEV", typ: &sev},
+		{name: "SEV_SNP", typ: &sevSNP},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			nc := &v1alpha1.GCENodeClass{}
+			nc.Spec.ConfidentialInstanceType = tc.typ
+
+			instance := buildConfidentialInstance(t, nc)
+
+			if tc.typ == nil {
+				require.Nil(t, instance.ConfidentialInstanceConfig)
+				// On-demand scheduling leaves OnHostMaintenance at its zero value
+				// (empty string); the Confidential override must not have fired.
+				require.NotEqual(t, "TERMINATE", instance.Scheduling.OnHostMaintenance)
+				return
+			}
+
+			require.NotNil(t, instance.ConfidentialInstanceConfig)
+			require.True(t, instance.ConfidentialInstanceConfig.EnableConfidentialCompute)
+			require.Equal(t, *tc.typ, instance.ConfidentialInstanceConfig.ConfidentialInstanceType)
+			require.Equal(t, "TERMINATE", instance.Scheduling.OnHostMaintenance)
+		})
+	}
 }

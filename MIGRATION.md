@@ -5,6 +5,80 @@
 
 ## Unreleased
 
+---
+
+## v0.5.0
+
+### Empty-node disruption now follows upstream Karpenter NodePool rules
+
+The provider no longer runs its separate empty-node cleanup controller. Empty nodes are now removed only through Karpenter's standard disruption controller, so NodePool `spec.disruption.consolidateAfter`, `consolidationPolicy`, and disruption budgets are honored consistently.
+
+A node that only contains a GKE `konnectivity-agent` Deployment pod is not considered empty by Karpenter core because the pod is Deployment-owned, not DaemonSet-owned. This avoids provider-induced delete/provision churn, but it can leave a lightly used node in place until normal underutilized consolidation can safely remove or replace it. First-class handling for non-DaemonSet system workloads should be revisited after upstream Karpenter support matures.
+
+**Action required:** review NodePool disruption settings if you relied on immediate provider-side empty-node deletion:
+
+```bash
+kubectl get nodepools -o yaml
+```
+
+Use `WhenEmptyOrUnderutilized` when you want Karpenter to consider consolidating lightly loaded nodes, including nodes that only run reschedulable system Deployment pods.
+
+### Reserved `GCENodeClass.spec.metadata` keys are rejected
+
+`GCENodeClass.spec.metadata` remains available for custom Compute Engine instance metadata, but it now rejects keys reserved by GKE bootstrap metadata.
+
+The following keys are rejected:
+
+- `cluster-location`
+- `cluster-name`
+- `cluster-uid`
+- `common-psm1`
+- `configure-sh`
+- `containerd-configure-sh`
+- `disable-address-manager`
+- `enable-os-login`
+- `gci-ensure-gke-docker`
+- `gci-metrics-enabled`
+- `gci-update-strategy`
+- `instance-template`
+- `install-ssh-psm1`
+- `k8s-node-setup-psm1`
+- `kube-env`
+- `kube-labels`
+- `kubeconfig`
+- `kubelet-config`
+- `startup-script`
+- `user-data`
+- `user-profile-psm1`
+- `windows-startup-script-ps1`
+
+**Action required:** audit existing `GCENodeClass` objects and remove these keys from `spec.metadata` before upgrading the CRD:
+
+```bash
+kubectl get gcenodeclasses -o yaml
+```
+
+Non-reserved custom metadata keys continue to work.
+
+---
+
+## v0.4.0
+
+### `kubeletConfiguration` fields now take effect
+
+`spec.kubeletConfiguration` fields on `GCENodeClass` that were previously accepted by the CRD but silently dropped at provisioning time are now applied to the kubelet on every Karpenter-provisioned node and to Karpenter's scheduler bin-packing. The previously honoured fields (`maxPods`) are unchanged.
+
+Newly honoured fields:
+
+- `systemReserved`, `kubeReserved` — reservations passed to the kubelet via `--config` and used by the scheduler to compute allocatable.
+- `evictionHard`, `evictionSoft`, `evictionSoftGracePeriod`, `evictionMaxPodGracePeriod` — passed to the kubelet. For the scheduler's overhead, only `evictionHard.memory.available` and `evictionHard.nodefs.available` are modelled (matches `aws/karpenter-provider-aws` and the [Kubernetes node-pressure-eviction docs](https://kubernetes.io/docs/tasks/administer-cluster/reserve-compute-resources/#eviction-thresholds)). `evictionSoft` is a warning threshold and is enforced by the kubelet at runtime but does not reduce scheduler allocatable.
+- `imageGCHighThresholdPercent`, `imageGCLowThresholdPercent`, `cpuCFSQuota`, `clusterDNS`, `podsPerCore` — passed to the kubelet. `podsPerCore` additionally caps `node.status.capacity.pods` at `podsPerCore × cpus`.
+
+**Action required:** audit existing `GCENodeClass` objects that set any of these fields. The values will now take effect on the next node provision, and a change to any field triggers Karpenter's standard drift-driven node rotation.
+
+The CRD value schema for `systemReserved`, `kubeReserved`, `evictionHard`, and `evictionSoft` is now validated against the `resource.Quantity` regex (and percentage syntax for the eviction fields). Existing values that already parsed as `resource.Quantity` are unaffected.
+
+---
 ### GPU node provisioning (`gpuDriverVersion`)
 
 Karpenter now automatically sets the two node labels required by the GKE GPU software stack
@@ -77,7 +151,7 @@ imageSelectorTerms:
 
 See [Image selection](docs/image-selection.md) for the full field reference and [Image management](docs/image-management.md#legacy-image-alias-format) for the complete migration table.
 
-**IAM note:** `container.clusters.getServerConfig` is included in `deploy/iam/karpenter-controller-role.yaml` and in the Terraform module. No additional action is required for users who followed the standard installation guide. Users on custom roles that predate this release may need to add the permission manually if they enable `channel:` terms.
+**IAM note:** GKE release-channel image resolution calls the `projects.locations.getServerConfig` API method. Custom IAM roles must include `container.clusters.list`; update your controller role before using the `channel:` term.
 
 ---
 
@@ -281,6 +355,8 @@ The service account resolution order is now:
 
 The fallback to the template's service account list has been removed. If your NodeClass and operator flag are both unset, provisioned nodes will use the Compute Engine default SA. This matches GKE's own default, but GKE recommends using a dedicated SA with minimal permissions ([`roles/container.nodeServiceAccount`](https://cloud.google.com/kubernetes-engine/docs/how-to/hardening-your-cluster#use_least_privilege_sa)) for production clusters. Set `DEFAULT_NODEPOOL_SERVICE_ACCOUNT` or `spec.serviceAccount` accordingly.
 
+---
+
 ## v0.3.0
 
 ### CRDs moved to a separate Helm chart (`karpenter-crd`)
@@ -394,8 +470,6 @@ The upgrade itself requires no action. The steps below are **optional** and only
 if you want to clean up orphaned instances that may have accumulated before this release
 (see #242). Future orphaned instances on new-style nodes are handled automatically.
 
----
-
 #### Step 1 (optional) — rotate live nodes
 
 Trigger a rolling replacement of your NodePools so that every replacement instance is
@@ -408,8 +482,6 @@ kubectl annotate nodepool <NODEPOOL_NAME> "karpenter.k8s.gcp/force-rollout=$(dat
 ```
 
 Repeat for each NodePool. Wait for all nodes to finish replacing before proceeding.
-
----
 
 #### Step 2 (optional) — find and delete orphaned instances
 

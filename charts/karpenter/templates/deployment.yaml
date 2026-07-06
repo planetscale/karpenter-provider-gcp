@@ -32,6 +32,10 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "karpenter.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -46,6 +50,10 @@ spec:
         - name: karpenter
           image: "{{ .Values.controller.image.repository }}:{{ default .Chart.AppVersion .Values.controller.image.tag }}{{ if .Values.controller.image.digest }}@{{ .Values.controller.image.digest }}{{ end }}"
           imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           env:
             - name: HEALTH_PROBE_PORT
               value: "{{ .Values.controller.healthProbe.port }}"
@@ -103,6 +111,8 @@ spec:
             - name: BATCH_IDLE_DURATION
               value: "{{ . }}"
             {{- end }}
+            - name: IGNORE_DRA_REQUESTS
+              value: "{{ .Values.controller.settings.ignoreDRARequests }}"
             {{- with .Values.controller.settings.vmMemoryOverheadPercent }}
             - name: VM_MEMORY_OVERHEAD_PERCENT
               value: "{{ . }}"

@@ -2,9 +2,43 @@
 
 ## Instance metadata
 
-Set GCE instance metadata key-value pairs for advanced configuration:
+Set GCE instance metadata key-value pairs for advanced configuration. Values in `spec.metadata` override matching keys from the base instance template; new keys are added.
 
 See [`examples/nodeclass/gcenodeclass-metadata.yaml`](https://github.com/cloudpilot-ai/karpenter-provider-gcp/blob/main/examples/nodeclass/gcenodeclass-metadata.yaml).
+
+For example, if the base GKE node-pool template sets `serial-port-logging-enable=true`, specifying `serial-port-logging-enable: "false"` in `spec.metadata` results in the provisioned instance having `serial-port-logging-enable=false`.
+
+### Reserved metadata keys
+
+The following GKE [`NodeConfig.metadata`](https://cloud.google.com/kubernetes-engine/docs/reference/rest/v1/NodeConfig) reserved keys cannot be set in `spec.metadata`:
+
+- `cluster-location`
+- `cluster-name`
+- `cluster-uid`
+- `common-psm1`
+- `configure-sh`
+- `containerd-configure-sh`
+- `disable-address-manager`
+- `enable-os-login`
+- `gci-ensure-gke-docker`
+- `gci-metrics-enabled`
+- `gci-update-strategy`
+- `instance-template`
+- `install-ssh-psm1`
+- `k8s-node-setup-psm1`
+- `kube-env`
+- `startup-script`
+- `user-data`
+- `user-profile-psm1`
+- `windows-startup-script-ps1`
+
+Karpenter also rejects provider-owned bootstrap surfaces that real GKE node templates use and that Karpenter parses or rebuilds rather than passing through as user metadata:
+
+- `kube-labels`
+- `kubeconfig`
+- `kubelet-config`
+
+Using any of these keys causes a CRD validation error at admission time. Custom metadata keys not in these lists work normally.
 
 > **Note:** For GPU driver version control, use `spec.gpuDriverVersion` instead of setting `cloud.google.com/gke-gpu-driver-version` via metadata. See [GPU Nodes](../gpu-nodes.md) for details.
 
@@ -16,21 +50,84 @@ See [`examples/nodeclass/secondary-disk-gcenodeclass.yaml`](https://github.com/c
 
 ## Custom kubelet settings
 
-Override pod density and resource reservations:
+Configure kubelet behavior on provisioned nodes using `spec.kubeletConfiguration`. These settings apply at boot time and inform Karpenter's scheduler for bin-packing calculations.
+
+### Resource reservations
+
+Reserve resources for system daemons and Kubernetes components:
+
+```yaml
+kubeletConfiguration:
+  systemReserved:
+    cpu: "1"
+    memory: 1Gi
+  kubeReserved:
+    cpu: 500m
+    memory: 200Mi
+```
+
+- `systemReserved` — resources reserved for OS system daemons and kernel memory
+- `kubeReserved` — resources reserved for Kubernetes components (kubelet, container runtime)
+
+Both settings reduce node allocatable capacity. The scheduler accounts for these when bin-packing workloads.
+
+Karpenter also adds a provider-computed 100m CPU scheduling overhead for GKE's node-owned kube-proxy mirror pod on Karpenter nodes. User-provided `systemReserved` values add to this overhead in Karpenter's allocatable estimate, but the kube-proxy overhead is not written into the node's kubelet reservation configuration.
+
+When you set a partial `kubeReserved` (for example, only `cpu`), Karpenter preserves provider-computed defaults for unspecified keys like `ephemeral-storage` based on boot disk size.
+
+### Eviction thresholds
+
+Configure kubelet eviction behavior:
+
+```yaml
+kubeletConfiguration:
+  evictionHard:
+    memory.available: 200Mi
+    nodefs.available: 10%
+  evictionSoft:
+    memory.available: 500Mi
+    nodefs.available: 15%
+  evictionSoftGracePeriod:
+    memory.available: 30s
+    nodefs.available: 1m
+  evictionMaxPodGracePeriod: 60
+```
+
+For scheduler bin-packing, only `evictionHard` for `memory.available` and `nodefs.available` reduce calculated allocatable capacity. This matches the AWS Karpenter provider and the [Kubernetes node-pressure-eviction documentation](https://kubernetes.io/docs/concepts/scheduling-eviction/node-pressure-eviction/).
+
+`evictionSoft` thresholds are enforced by the kubelet at runtime but do not affect allocatable calculations.
+
+### Pod density
+
+Control the maximum number of pods per node:
 
 ```yaml
 kubeletConfiguration:
   maxPods: 50
-  systemReserved:
-    cpu: 100m
-    memory: 100Mi
-  kubeReserved:
-    cpu: 100m
-    memory: 200Mi
-  evictionHard:
-    memory.available: 200Mi
-    nodefs.available: 10%
+  podsPerCore: 8
 ```
+
+- `maxPods` — absolute cap on pods per node
+- `podsPerCore` — caps pods at `podsPerCore × cpu_cores`; cannot exceed `maxPods`
+
+Both values are reflected in `node.status.capacity.pods` and used by the scheduler.
+
+### Other settings
+
+Additional kubelet configuration options:
+
+```yaml
+kubeletConfiguration:
+  clusterDNS:
+    - 10.0.1.100
+  cpuCFSQuota: false
+  imageGCHighThresholdPercent: 85
+  imageGCLowThresholdPercent: 80
+```
+
+- `clusterDNS` — override cluster DNS server addresses
+- `cpuCFSQuota` — enable or disable CPU CFS quota enforcement for containers with CPU limits
+- `imageGCHighThresholdPercent` / `imageGCLowThresholdPercent` — control when kubelet garbage-collects unused container images
 
 ## Shielded VM
 
@@ -50,6 +147,87 @@ The options are:
 - **enableIntegrityMonitoring**: Monitors and reports changes to the boot sequence. View integrity reports in Cloud Monitoring.
 
 See [GCP Shielded VM documentation](https://cloud.google.com/compute/shielded-vm/docs/shielded-vm) for details on each feature.
+
+## Confidential VM
+
+Confidential VM provides in-use memory encryption via AMD SEV / SEV-SNP or Intel TDX. It is only supported on specific machine families; see the [GCP support matrix](https://cloud.google.com/confidential-computing/confidential-vm/docs/os-and-machine-type) for the current list.
+
+```yaml
+confidentialInstanceType: SEV_SNP  # SEV | SEV_SNP | TDX
+```
+
+Setting `confidentialInstanceType` enables Confidential VM with the named technology. Karpenter forces `scheduling.onHostMaintenance` to `TERMINATE` on provisioned instances because Confidential VMs cannot live-migrate. Leave the field unset to disable Confidential VM.
+
+If the chosen machine type does not support the requested confidential type, GCE rejects the instance creation and the error surfaces on the `NodeClaim` `Launched` condition.
+
+The default `ContainerOptimizedOS` and `Ubuntu` images boot as Confidential VMs on supported families without any image change. GPU Confidential VMs are an exception: an A3 instance with an attached H100 GPU using Intel TDX requires a TDX-specific image (for example `cos-tdx-*`), which is not available through the `family` image selectors. Pin such an image by its full resource URL with `imageSelectorTerms[].id`; see the [GCP supported configurations](https://cloud.google.com/confidential-computing/confidential-vm/docs/supported-configurations#supported-images-gpu).
+
+## Disk type scheduling
+
+Karpenter applies `disk-type.gke.io/*` labels to provisioned nodes based on the instance type's machine family. These labels indicate which persistent disk types the instance supports, enabling two capabilities:
+
+1. **NodePool requirements** — constrain scheduling to instance types that support specific disk types
+2. **PD CSI topology scheduling** — enable StorageClasses with `allowedTopologies` based on disk-type labels
+
+### Constraining instance types by disk support
+
+Use disk-type labels in NodePool requirements to ensure Karpenter selects only instance types that support the disk types your workloads need:
+
+```yaml
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: hyperdisk-workloads
+spec:
+  template:
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.gcp
+        kind: GCENodeClass
+        name: default-example
+      requirements:
+        - key: disk-type.gke.io/hyperdisk-balanced
+          operator: In
+          values: ["true"]
+```
+
+This NodePool provisions only instance types from families that support Hyperdisk Balanced (such as n2, n4, c3, c4). Instance types from families without Hyperdisk Balanced support (such as e2, n1) are excluded.
+
+### Available disk-type labels
+
+The supported labels correspond to GCP disk types:
+
+| Label                                                   | Disk type                            |
+|---------------------------------------------------------|--------------------------------------|
+| `disk-type.gke.io/pd-standard`                          | Standard persistent disk             |
+| `disk-type.gke.io/pd-balanced`                          | Balanced persistent disk             |
+| `disk-type.gke.io/pd-ssd`                               | SSD persistent disk                  |
+| `disk-type.gke.io/pd-extreme`                           | Extreme persistent disk              |
+| `disk-type.gke.io/hyperdisk-balanced`                   | Hyperdisk Balanced                   |
+| `disk-type.gke.io/hyperdisk-extreme`                    | Hyperdisk Extreme                    |
+| `disk-type.gke.io/hyperdisk-throughput`                 | Hyperdisk Throughput                 |
+| `disk-type.gke.io/hyperdisk-ml`                         | Hyperdisk ML                         |
+| `disk-type.gke.io/hyperdisk-balanced-high-availability` | Hyperdisk Balanced High Availability |
+
+Disk compatibility is determined at the machine family level (`n2`, `c3`, `e2`), not the specific instance size. See the [GCP machine family disk support matrix](https://cloud.google.com/compute/docs/disks#disk-types) for which families support which disk types.
+
+### PD CSI topology scheduling
+
+The disk-type labels are also published as topology keys by the GCE Persistent Disk CSI driver when the StorageClass enables disk topology:
+
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: hyperdisk-balanced
+provisioner: pd.csi.storage.gke.io
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  type: hyperdisk-balanced
+  use-allowed-disk-topology: "true"
+```
+
+StorageClasses with `use-allowed-disk-topology: "true"` can use disk-type labels in `allowedTopologies`, and bound PVs can carry these labels in node affinity so replacement pods schedule only on nodes that support the disk type.
 
 ## Multiple NodePools
 
@@ -106,3 +284,5 @@ spec:
     consolidationPolicy: WhenEmpty
     consolidateAfter: 30m
 ```
+
+Karpenter-provider-gcp relies on Karpenter's upstream disruption controller for empty-node removal. Use NodePool `spec.disruption` to express empty-node timing and budgets; provider-managed system Deployments such as GKE `konnectivity-agent` are not ignored by a provider-specific deletion loop.

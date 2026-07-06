@@ -43,16 +43,17 @@ import (
 
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/apis/v1alpha1"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/auth"
-	pkgcache "github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/cache"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/gke"
+	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/offerings/unavailableofferings"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/pricing"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/utils/localssd"
 )
 
 const (
-	InstanceTypesCacheKey = "gce-instancetypes"
-	// InstanceTypesCacheTTL is the time before we refresh instance types and zones at GCE, not too long to avoid OOM
-	InstanceTypesCacheTTL = 30 * time.Hour
+	// StaticInstanceTypesCacheTTL bounds cached NodeClass-derived instance type shapes.
+	// Dynamic offerings are injected on each List call and are not stored here.
+	StaticInstanceTypesCacheTTL     = 30 * time.Hour
+	staticInstanceTypesCacheCleanup = time.Minute
 )
 
 // ZoneData contains information about a GCE zone and its availability
@@ -89,28 +90,35 @@ type DefaultProvider struct {
 	instanceTypesSeqNum    uint64
 	cm                     *pretty.ChangeMonitor
 
-	unavailableOfferings *pkgcache.UnavailableOfferings
-	// FIXME: use cache to speed up query.
-	instanceTypesCache *cache.Cache
+	unavailableOfferings *unavailableofferings.UnavailableOfferings
+
+	staticInstanceTypesCache   *cache.Cache
+	muStaticInstanceTypesCache sync.Mutex
+}
+
+type staticInstanceType struct {
+	machineType  *computepb.MachineType
+	instanceType *cloudprovider.InstanceType
+	ssdCount     int
 }
 
 func NewDefaultProvider(ctx context.Context, authOptions *auth.Credential, pricingProvider pricing.Provider,
-	gkeProvider gke.Provider, unavailableOfferingsCache *pkgcache.UnavailableOfferings) *DefaultProvider {
+	gkeProvider gke.Provider, unavailableOfferingsCache *unavailableofferings.UnavailableOfferings) *DefaultProvider {
 	machineTypesClient, err := compute.NewMachineTypesRESTClient(ctx)
 	if err != nil {
 		log.FromContext(ctx).Error(err, "failed to create default provider for node pool template")
 		os.Exit(1)
 	}
 	return &DefaultProvider{
-		authOptions:            authOptions,
-		machineTypesClient:     machineTypesClient,
-		pricingProvider:        pricingProvider,
-		gkeProvider:            gkeProvider,
-		instanceTypesCache:     cache.New(InstanceTypesCacheTTL, pkgcache.DefaultCleanupInterval),
-		instanceTypesOfferings: make(map[string]sets.Set[string]),
-		unavailableOfferings:   unavailableOfferingsCache,
-		cm:                     pretty.NewChangeMonitor(),
-		instanceTypesSeqNum:    0,
+		authOptions:              authOptions,
+		machineTypesClient:       machineTypesClient,
+		pricingProvider:          pricingProvider,
+		gkeProvider:              gkeProvider,
+		staticInstanceTypesCache: cache.New(StaticInstanceTypesCacheTTL, staticInstanceTypesCacheCleanup),
+		instanceTypesOfferings:   make(map[string]sets.Set[string]),
+		unavailableOfferings:     unavailableOfferingsCache,
+		cm:                       pretty.NewChangeMonitor(),
+		instanceTypesSeqNum:      0,
 	}
 }
 
@@ -145,37 +153,66 @@ func (p *DefaultProvider) List(ctx context.Context, nodeClass *v1alpha1.GCENodeC
 		return nil, err
 	}
 
-	zonesHash, _ := hashstructure.Hash(zones, hashstructure.FormatV2, &hashstructure.HashOptions{SlicesAsSets: true})
-	kcHash, _ := hashstructure.Hash(nodeClass.Spec.KubeletConfiguration, hashstructure.FormatV2, &hashstructure.HashOptions{SlicesAsSets: true})
-	disksHash, _ := hashstructure.Hash(nodeClass.Spec.Disks, hashstructure.FormatV2, &hashstructure.HashOptions{SlicesAsSets: true})
-	listKey := fmt.Sprintf("%d-%d-%d-%d-%d-%s",
-		p.instanceTypesSeqNum, p.unavailableOfferings.SeqNum, zonesHash, kcHash, disksHash,
-		nodeClass.Spec.LocalSsdMode)
-	item, ok := p.instanceTypesCache.Get(listKey)
-	if ok && len(item.([]*cloudprovider.InstanceType)) > 0 {
-		return item.([]*cloudprovider.InstanceType), nil
+	staticInstanceTypes, err := p.getStaticInstanceTypes(ctx, nodeClass)
+	if err != nil {
+		return nil, err
 	}
 
-	instanceTypes := []*cloudprovider.InstanceType{}
+	return p.injectOfferings(ctx, staticInstanceTypes, zones), nil
+}
+
+func (p *DefaultProvider) getStaticInstanceTypes(ctx context.Context, nodeClass *v1alpha1.GCENodeClass) ([]staticInstanceType, error) {
+	kcHash, _ := hashstructure.Hash(nodeClass.Spec.KubeletConfiguration, hashstructure.FormatV2, &hashstructure.HashOptions{SlicesAsSets: true})
+	disksHash, _ := hashstructure.Hash(nodeClass.Spec.Disks, hashstructure.FormatV2, &hashstructure.HashOptions{SlicesAsSets: true})
+	// LocalSsdMode changes static capacity/overhead (Ephemeral mounts SSDs as
+	// the kubelet ephemeral-storage filesystem), so it must key the cache.
+	key := fmt.Sprintf("%d-%d-%d-%s", atomic.LoadUint64(&p.instanceTypesSeqNum), kcHash, disksHash, nodeClass.Spec.LocalSsdMode)
+
+	if item, ok := p.staticInstanceTypesCache.Get(key); ok {
+		return item.([]staticInstanceType), nil
+	}
+
+	p.muStaticInstanceTypesCache.Lock()
+	defer p.muStaticInstanceTypesCache.Unlock()
+	if item, ok := p.staticInstanceTypesCache.Get(key); ok {
+		return item.([]staticInstanceType), nil
+	}
+
+	instanceTypes := []staticInstanceType{}
 	for _, mt := range p.instanceTypesInfo {
 		instanceType := lo.FromPtr(mt.Name)
 		if instanceType == "" || mt.MemoryMb == nil || mt.GuestCpus == nil {
 			continue
 		}
 
-		zoneData := p.buildZoneData(instanceType, zones)
 		for _, ssdCount := range ssdCountVariants(mt) {
-			offerings := p.createOfferings(ctx, instanceType, zoneData)
-			if len(offerings) == 0 {
+			it := NewStaticInstanceType(ctx, mt, nodeClass, ssdCount)
+			if it == nil {
 				continue
 			}
-			instanceTypes = append(instanceTypes,
-				NewInstanceType(ctx, mt, nodeClass, p.authOptions.Region, offerings, ssdCount))
+			instanceTypes = append(instanceTypes, staticInstanceType{machineType: mt, instanceType: it, ssdCount: ssdCount})
 		}
 	}
-	p.instanceTypesCache.SetDefault(listKey, instanceTypes)
-
+	p.staticInstanceTypesCache.SetDefault(key, instanceTypes)
 	return instanceTypes, nil
+}
+
+func (p *DefaultProvider) injectOfferings(ctx context.Context, staticInstanceTypes []staticInstanceType, zones []string) []*cloudprovider.InstanceType {
+	instanceTypes := []*cloudprovider.InstanceType{}
+	for _, cached := range staticInstanceTypes {
+		instanceType := cached.instanceType.Name
+		zoneData := p.buildZoneData(instanceType, zones)
+		offerings := p.createOfferings(ctx, instanceType, zoneData)
+		if len(offerings) == 0 {
+			continue
+		}
+
+		it := cached.instanceType.DeepCopy()
+		it.Offerings = offerings
+		it.Requirements = computeRequirements(cached.machineType, offerings, p.authOptions.Region, cached.ssdCount)
+		instanceTypes = append(instanceTypes, it)
+	}
+	return instanceTypes
 }
 
 // ssdCountVariants returns the local-SSD counts to emit as separate
@@ -298,6 +335,7 @@ func (p *DefaultProvider) UpdateInstanceTypes(ctx context.Context) error {
 	}
 	if p.cm.HasChanged("instance-types", types) {
 		atomic.AddUint64(&p.instanceTypesSeqNum, 1)
+		p.staticInstanceTypesCache.Flush()
 	}
 	p.instanceTypesInfo = types
 	byName := make(map[string]*computepb.MachineType, len(types))

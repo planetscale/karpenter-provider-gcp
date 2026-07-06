@@ -112,6 +112,7 @@ _Appears in:_
 | `metadata` _object (keys:string, values:string)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
 | `networkTags` _[NetworkTag](#networktag) array_ | NetworkTags is a list of network tags to apply to the node. |  | MaxItems: 20 <br />MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z]([-a-z0-9]\{0,61\}[a-z0-9])?$` <br />Optional: \{\} <br /> |
 | `shieldedInstanceConfig` _[ShieldedInstanceConfig](#shieldedinstanceconfig)_ | ShieldedInstanceConfig enables Shielded VM for provisioned nodes: Secure Boot,<br />virtual TPM, and integrity monitoring. |  | Optional: \{\} <br /> |
+| `confidentialInstanceType` _string_ | ConfidentialInstanceType enables Confidential VM for provisioned nodes using the<br />named technology (AMD SEV / SEV-SNP or Intel TDX), providing in-use memory<br />encryption. Leave unset to disable. Only supported on specific machine families. |  | Enum: [SEV SEV_SNP TDX] <br />Optional: \{\} <br /> |
 | `networkConfig` _[NetworkConfig](#networkconfig)_ | NetworkConfig allows overriding per-interface network settings for provisioned nodes. |  | Optional: \{\} <br /> |
 | `autoGPUTaint` _boolean_ | AutoGPUTaint, when true, automatically applies nvidia.com/gpu=present:NoSchedule<br />to any GPU node at provisioning time, regardless of the NodePool configuration.<br />Disabled by default to preserve backward compatibility. |  | Optional: \{\} <br /> |
 | `gpuDriverVersion` _string_ | GPUDriverVersion controls which NVIDIA driver version GKE installs on GPU nodes.<br />Mirrors the GKE node pool gpu_driver_installation_config.gpu_driver_version field.<br />Valid values: "default" (GKE-recommended stable), "latest" (newest, COS only),<br />"disabled" (skip automatic installation).<br />Ignored for non-GPU instance types. | default | Enum: [default latest disabled] <br />Optional: \{\} <br /> |
@@ -193,15 +194,29 @@ _Appears in:_
 | `clusterDNS` _string array_ | clusterDNS is a list of IP addresses for the cluster DNS server.<br />Note that not all providers may use all addresses. |  | Optional: \{\} <br /> |
 | `maxPods` _integer_ | MaxPods is an override for the maximum number of pods that can run on<br />a worker node instance. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `podsPerCore` _integer_ | PodsPerCore is an override for the number of pods that can run on a worker node<br />instance based on the number of cpu cores. This value cannot exceed MaxPods, so, if<br />MaxPods is a lower value, that value will be used. |  | Minimum: 0 <br />Optional: \{\} <br /> |
-| `systemReserved` _object (keys:string, values:string)_ | SystemReserved contains resources reserved for OS system daemons and kernel memory. |  | MaxProperties: 10 <br />Optional: \{\} <br /> |
-| `kubeReserved` _object (keys:string, values:string)_ | KubeReserved contains resources reserved for Kubernetes system components. |  | MaxProperties: 10 <br />Optional: \{\} <br /> |
-| `evictionHard` _object (keys:string, values:string)_ | EvictionHard is the map of signal names to quantities that define hard eviction thresholds |  | MaxProperties: 10 <br />Optional: \{\} <br /> |
-| `evictionSoft` _object (keys:string, values:string)_ | EvictionSoft is the map of signal names to quantities that define soft eviction thresholds |  | MaxProperties: 10 <br />Optional: \{\} <br /> |
+| `systemReserved` _object (keys:string, values:[KubeletQuantity](#kubeletquantity))_ | SystemReserved contains resources reserved for OS system daemons and kernel memory. |  | MaxProperties: 10 <br />Optional: \{\} <br /> |
+| `kubeReserved` _object (keys:string, values:[KubeletQuantity](#kubeletquantity))_ | KubeReserved contains resources reserved for Kubernetes system components. |  | MaxProperties: 10 <br />Optional: \{\} <br /> |
+| `evictionHard` _object (keys:string, values:[KubeletQuantity](#kubeletquantity))_ | EvictionHard is the map of signal names to quantities that define hard eviction thresholds |  | MaxProperties: 10 <br />Optional: \{\} <br /> |
+| `evictionSoft` _object (keys:string, values:[KubeletQuantity](#kubeletquantity))_ | EvictionSoft is the map of signal names to quantities that define soft eviction thresholds |  | MaxProperties: 10 <br />Optional: \{\} <br /> |
 | `evictionSoftGracePeriod` _object (keys:string, values:[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#duration-v1-meta))_ | EvictionSoftGracePeriod is the map of signal names to quantities that define grace periods for each eviction signal |  | MaxProperties: 10 <br />Optional: \{\} <br /> |
 | `evictionMaxPodGracePeriod` _integer_ | EvictionMaxPodGracePeriod is the maximum allowed grace period (in seconds) to use when terminating pods in<br />response to soft eviction thresholds being met. |  | Optional: \{\} <br /> |
 | `imageGCHighThresholdPercent` _integer_ | ImageGCHighThresholdPercent is the percent of disk usage after which image<br />garbage collection is always run. The percent is calculated by dividing this<br />field value by 100, so this field must be between 0 and 100, inclusive.<br />When specified, the value must be greater than ImageGCLowThresholdPercent. |  | Maximum: 100 <br />Minimum: 0 <br />Optional: \{\} <br /> |
 | `imageGCLowThresholdPercent` _integer_ | ImageGCLowThresholdPercent is the percent of disk usage before which image<br />garbage collection is never run. Lowest disk usage to garbage collect to.<br />The percent is calculated by dividing this field value by 100,<br />so the field value must be between 0 and 100, inclusive.<br />When specified, the value must be less than imageGCHighThresholdPercent |  | Maximum: 100 <br />Minimum: 0 <br />Optional: \{\} <br /> |
 | `cpuCFSQuota` _boolean_ | CPUCFSQuota enables CPU CFS quota enforcement for containers that specify CPU limits. |  | Optional: \{\} <br /> |
+
+
+#### KubeletQuantity
+
+_Underlying type:_ _string_
+
+KubeletQuantity is a bounded kubelet resource quantity or percentage string.
+
+_Validation:_
+- MaxLength: 64
+
+_Appears in:_
+- [KubeletConfiguration](#kubeletconfiguration)
+
 
 
 #### LocalSSDMode

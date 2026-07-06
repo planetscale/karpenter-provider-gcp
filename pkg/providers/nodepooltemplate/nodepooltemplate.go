@@ -22,13 +22,11 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
-	"strings"
 	"sync"
 
 	"google.golang.org/api/compute/v1"
 	"google.golang.org/api/container/v1"
 	"google.golang.org/api/googleapi"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -39,8 +37,8 @@ type Provider interface {
 	Sync(ctx context.Context) error
 	// EnsureFallbackPool creates the karpenter-fallback pool if it does not already exist.
 	EnsureFallbackPool(ctx context.Context) error
-	// GetSourcePoolName returns the name of the currently selected bootstrap source pool.
-	GetSourcePoolName(ctx context.Context) (string, error)
+	// GetSourceTemplateMetadata returns metadata from the currently selected source template.
+	GetSourceTemplateMetadata(ctx context.Context) (*compute.Metadata, error)
 }
 
 type DefaultProvider struct {
@@ -50,7 +48,6 @@ type DefaultProvider struct {
 
 	computeService        *compute.Service
 	containerService      *container.Service
-	kubeClient            client.Client
 	ClusterInfo           ClusterInfo
 	defaultServiceAccount string
 	// preferredPoolName is the operator-pinned pool name (DEFAULT_NODEPOOL_TEMPLATE_NAME).
@@ -64,7 +61,6 @@ type ClusterInfo struct {
 	NodeLocation    string
 	Region          string
 	Name            string
-	Zones           []string
 }
 
 const (
@@ -72,21 +68,15 @@ const (
 	// RUNNING cluster pool is available.
 	KarpenterFallbackNodePoolTemplate          = "karpenter-fallback"
 	KarpenterFallbackNodePoolTemplateImageType = "COS_CONTAINERD"
+	clusterNameMetadataKey                     = "cluster-name"
+	nodePoolNameLabelKey                       = "goog-k8s-node-pool-name"
 )
 
-func NewDefaultProvider(ctx context.Context, kubeClient client.Client, computeService *compute.Service,
-	containerService *container.Service,
+func NewDefaultProvider(_ context.Context, computeService *compute.Service, containerService *container.Service,
 	clusterName, region, projectID, serviceAccount, clusterLocation, nodeLocation string,
 	preferredPoolName string) *DefaultProvider {
 
-	zones, err := resolveZones(ctx, computeService, projectID, region)
-	if err != nil {
-		log.FromContext(ctx).Error(err, "failed to create default provider for node pool template")
-		return nil
-	}
-
 	return &DefaultProvider{
-		kubeClient:            kubeClient,
 		computeService:        computeService,
 		containerService:      containerService,
 		defaultServiceAccount: serviceAccount,
@@ -97,37 +87,8 @@ func NewDefaultProvider(ctx context.Context, kubeClient client.Client, computeSe
 			NodeLocation:    nodeLocation,
 			Region:          region,
 			Name:            clusterName,
-			Zones:           zones,
 		},
 	}
-}
-
-func resolveZones(ctx context.Context, computeService *compute.Service, projectID, region string) ([]string, error) {
-	logger := log.FromContext(ctx)
-	logger.Info("resolving zones", "ProjectID", projectID, "Region", region)
-
-	var zones []string
-	prefix := region + "-"
-	err := computeService.Zones.List(projectID).Pages(ctx, func(page *compute.ZoneList) error {
-		for _, zone := range page.Items {
-			if strings.HasPrefix(zone.Name, prefix) {
-				zones = append(zones, zone.Name)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		logger.Error(err, "error listing zones from GCP")
-		return nil, err
-	}
-
-	if len(zones) == 0 {
-		logger.Info("no zones found matching region prefix", "region", region)
-		return nil, fmt.Errorf("no zones found for region: %s", region)
-	}
-
-	logger.Info("resolved zones", "zones", zones)
-	return zones, nil
 }
 
 // Sync discovers the eligible bootstrap source pool and caches its name.
@@ -240,9 +201,9 @@ func eligiblePoolsSorted(pools []*container.NodePool, excludeName string) []stri
 	return candidates
 }
 
-// GetSourcePoolName returns the name of the currently selected bootstrap source pool.
+// getSourcePoolName returns the name of the currently selected bootstrap source pool.
 // Returns an error if pool discovery has not completed yet.
-func (p *DefaultProvider) GetSourcePoolName(_ context.Context) (string, error) {
+func (p *DefaultProvider) getSourcePoolName(_ context.Context) (string, error) {
 	p.mu.RLock()
 	name := p.sourcePoolName
 	p.mu.RUnlock()
@@ -250,6 +211,46 @@ func (p *DefaultProvider) GetSourcePoolName(_ context.Context) (string, error) {
 		return "", fmt.Errorf("bootstrap source pool not yet discovered")
 	}
 	return name, nil
+}
+
+func (p *DefaultProvider) GetSourceTemplateMetadata(ctx context.Context) (*compute.Metadata, error) {
+	sourcePoolName, err := p.getSourcePoolName(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getting source pool name: %w", err)
+	}
+
+	instanceTemplates, err := p.computeService.RegionInstanceTemplates.List(p.ClusterInfo.ProjectID, p.ClusterInfo.Region).Context(ctx).Do()
+	if err != nil {
+		return nil, fmt.Errorf("cannot list all instance templates for node pool name %q: %w", sourcePoolName, err)
+	}
+
+	for _, template := range instanceTemplates.Items {
+		if template.Properties == nil || template.Properties.Labels == nil || template.Properties.Metadata == nil {
+			continue
+		}
+		if !hasMetadataValue(template.Properties.Metadata, clusterNameMetadataKey, p.ClusterInfo.Name) {
+			continue
+		}
+		if template.Properties.Labels[nodePoolNameLabelKey] != sourcePoolName {
+			continue
+		}
+		log.FromContext(ctx).Info("Found instance template", "templateName", template.Name, "clusterName", p.ClusterInfo.Name)
+		return template.Properties.Metadata, nil
+	}
+
+	return nil, fmt.Errorf("no instance template found with label %s=%s", nodePoolNameLabelKey, sourcePoolName)
+}
+
+func hasMetadataValue(meta *compute.Metadata, key, value string) bool {
+	if meta == nil {
+		return false
+	}
+	for _, item := range meta.Items {
+		if item != nil && item.Key == key && item.Value != nil && *item.Value == value {
+			return true
+		}
+	}
+	return false
 }
 
 // ensureKarpenterNodePoolTemplate creates the fallback pool if it does not already exist.

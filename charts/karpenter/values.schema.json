@@ -62,6 +62,16 @@
       "additionalProperties": { "type": "string" },
       "description": "Labels added to the controller pod."
     },
+    "podSecurityContext": {
+      "type": ["object", "null"],
+      "additionalProperties": true,
+      "description": "Security context applied at the pod level."
+    },
+    "securityContext": {
+      "type": ["object", "null"],
+      "additionalProperties": true,
+      "description": "Security context applied to the karpenter container."
+    },
     "podDisruptionBudget": {
       "type": "object",
       "additionalProperties": false,
@@ -73,6 +83,15 @@
           ],
           "description": "Minimum number of available pods (integer or percentage string).",
           "default": 1
+        },
+        "maxUnavailable": {
+          "oneOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "string", "minLength": 1 },
+            { "type": "null" }
+          ],
+          "description": "Maximum number of unavailable pods (integer or percentage string). When set, takes precedence over minAvailable.",
+          "default": null
         }
       }
     },
@@ -343,6 +362,11 @@
               "type": "string",
               "description": "Idle timeout that ends a batch window when no new pods arrive (e.g. 1s).",
               "default": "1s"
+            },
+            "ignoreDRARequests": {
+              "type": "boolean",
+              "description": "When true, Karpenter ignores pods' Dynamic Resource Allocation requests during scheduling simulations.",
+              "default": true
             },
             "defaultNodePoolTemplateName": {
               "type": "string",

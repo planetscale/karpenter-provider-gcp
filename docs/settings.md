@@ -32,6 +32,23 @@ These options configure the controller's runtime behavior.
 | `--log-level`                 | `LOG_LEVEL`                 | `logLevel`                              | `info`  | Controller log level (`debug`, `info`, `warn`, `error`).                                                                                          |
 | `--batch-max-duration`        | `BATCH_MAX_DURATION`        | `controller.settings.batchMaxDuration`  | `10s`   | Maximum time Karpenter batches incoming pods before provisioning.                                                                                 |
 | `--batch-idle-duration`       | `BATCH_IDLE_DURATION`       | `controller.settings.batchIdleDuration` | `1s`    | Idle time after the last pod event before Karpenter triggers provisioning.                                                                        |
+| `--ignore-dra-requests`       | `IGNORE_DRA_REQUESTS`       | `controller.settings.ignoreDRARequests` | `true`  | When `true`, Karpenter ignores pods' Dynamic Resource Allocation requests during scheduling simulations.                                          |
+
+### Dynamic Resource Allocation (DRA)
+
+Dynamic Resource Allocation (DRA) is a Kubernetes API for requesting and sharing hardware devices — typically GPUs and other accelerators — through `ResourceClaim` objects rather than plain resource requests. Pods reference a claim, and a DRA driver allocates matching devices on nodes that can satisfy it.
+
+Karpenter ignores DRA requests during scheduling simulations by default (`controller.settings.ignoreDRARequests: true`). This preserves scheduling behavior for clusters without DRA drivers, the common case on GKE.
+
+Set `ignoreDRARequests` to `false` only when the cluster has DRA drivers installed and runs workloads that schedule against `ResourceClaim`s. When disabled, Karpenter registers the upstream device-allocation controller and accounts for DRA device availability when provisioning.
+
+```yaml
+controller:
+  settings:
+    ignoreDRARequests: false
+```
+
+DRA is a Kubernetes-level feature. Review the [Kubernetes DRA documentation](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/) and your DRA driver's requirements before enabling it.
 
 ## GCP-specific Settings
 
@@ -66,9 +83,74 @@ controller:
       value: "my-node-sa@my-project.iam.gserviceaccount.com"
 ```
 
+## Security Contexts
+
+By default, the Helm chart applies least-privilege security contexts to the controller pod and the `karpenter` container. These follow the Kubernetes Pod Security Standards and let the controller run under the `restricted` profile. Each context is rendered only when its value is non-empty, so you can override individual fields or disable a context entirely by setting it to `{}`.
+
+| Helm value           | Scope     | Default                                                                                                                                                    | Description                                            |
+|----------------------|-----------|------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------|
+| `podSecurityContext` | Pod       | `runAsNonRoot: true`, `seccompProfile.type: RuntimeDefault`                                                                                                | Security context applied at the pod level.             |
+| `securityContext`    | Container | `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, `runAsNonRoot: true`, `capabilities.drop: [ALL]`, `seccompProfile.type: RuntimeDefault` | Security context applied to the `karpenter` container. |
+
+These are the chart defaults:
+
+```yaml
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  capabilities:
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault
+```
+
+To override a field, set it under the corresponding key. For example, to pin the user the controller runs as:
+
+```yaml
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  seccompProfile:
+    type: RuntimeDefault
+```
+
+To disable a context, set it to an empty object so no `securityContext` block is rendered:
+
+```yaml
+podSecurityContext: {}
+securityContext: {}
+```
+
+## PodDisruptionBudget
+
+The chart creates a PodDisruptionBudget for the controller pods so voluntary disruptions — node drains during upgrades, consolidation, or maintenance — cannot evict every Karpenter replica at once. The default is `minAvailable: 1`, which keeps at least one controller pod running while the others are evicted.
+
+| Helm value                           | Default | Description                                                                                                |
+|--------------------------------------|---------|------------------------------------------------------------------------------------------------------------|
+| `podDisruptionBudget.minAvailable`   | `1`     | Minimum number of controller pods that must stay available. Used when `maxUnavailable` is not set.         |
+| `podDisruptionBudget.maxUnavailable` | `null`  | Maximum number of controller pods that may be unavailable. When set, takes precedence over `minAvailable`. |
+
+Set `podDisruptionBudget.maxUnavailable` to cap the number of controller pods that may be unavailable instead. When set, `maxUnavailable` takes precedence over `minAvailable`, and the rendered PodDisruptionBudget uses `maxUnavailable` alone. Leave it unset (the default) to keep the `minAvailable` behavior. Both values accept an integer or a percentage string (e.g. `"50%"`).
+
+```yaml
+podDisruptionBudget:
+  maxUnavailable: 1
+```
+
 ## NodePool Features
 
 These fields are set on `NodePool` objects, not on the controller. They are part of the karpenter-core API and are available in this provider.
+
+### Karpenter core v1.13
+
+Karpenter core v1.13 adds Dynamic Resource Allocation device allocation tracking and treats Kubernetes Node Readiness Controller taints (`readiness.k8s.io/*`) as ephemeral during scheduling. DRA scheduling remains disabled by default through `controller.settings.ignoreDRARequests: true` — see [Dynamic Resource Allocation (DRA)](#dynamic-resource-allocation-dra).
 
 ### Node count limit (v1.11)
 

@@ -19,8 +19,6 @@ package controllers
 import (
 	"context"
 
-	computev1 "cloud.google.com/go/compute/apiv1"
-	"cloud.google.com/go/compute/metadata"
 	"github.com/awslabs/operatorpkg/controller"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -28,12 +26,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/karpenter/pkg/events"
 
-	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/auth"
-	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/cache"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/cloudprovider"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/controllers/csr"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/controllers/interruption"
-	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/controllers/node"
 	nodeclaimgc "github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/controllers/nodeclaim/garbagecollection"
 	nodeclasshash "github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/controllers/nodeclass/hash"
 	nodeclassstatus "github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/controllers/nodeclass/status"
@@ -44,9 +39,9 @@ import (
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/controllers/telemetry"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/operator/options"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/imagefamily"
-	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/instance"
 	providerinstancetype "github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/instancetype"
 	providernodepooltemplate "github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/nodepooltemplate"
+	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/offerings/unavailableofferings"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/pricing"
 )
 
@@ -56,14 +51,10 @@ func NewController(
 	kubeClient client.Client,
 	kubernetesInterface kubernetes.Interface,
 	recorder events.Recorder,
-	unavailableOfferings *cache.UnavailableOfferings,
-	metadataClient *metadata.Client,
-	zoneOperationClient *computev1.ZoneOperationsClient,
-	credential auth.Credential,
+	unavailableOfferings *unavailableofferings.UnavailableOfferings,
 	imageProvider imagefamily.Provider,
 	nodePoolTemplateProvider providernodepooltemplate.Provider,
 	instanceTypeProvider providerinstancetype.Provider,
-	instanceProvider instance.Provider,
 	cloudProvider *cloudprovider.CloudProvider,
 	pricingProvider pricing.Provider,
 ) []controller.Controller {
@@ -75,7 +66,6 @@ func NewController(
 		instancetype.NewController(instanceTypeProvider),
 		csr.NewController(kubernetesInterface),
 		controllerspricing.NewController(pricingProvider),
-		node.NewController(kubeClient, cloudProvider),
 		nodeclaimgc.NewController(kubeClient, cloudProvider),
 	}
 
@@ -84,10 +74,6 @@ func NewController(
 			kubeClient,
 			recorder,
 			unavailableOfferings,
-			metadataClient,
-			zoneOperationClient,
-			credential,
-			instanceProvider,
 		))
 	}
 

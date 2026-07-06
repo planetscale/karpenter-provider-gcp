@@ -21,15 +21,19 @@ REGION ?= us-central1
 # Common Directories
 MOD_DIRS = $(shell find . -path "./website" -prune -o -name go.mod -type f -print | xargs dirname)
 KARPENTER_CORE_DIR = $(shell go list -m -f '{{ .Dir }}' sigs.k8s.io/karpenter)
+PDCSI_MODULE = sigs.k8s.io/gcp-compute-persistent-disk-csi-driver
+PDCSI_DATA_DIR = hack/pdcsi-data
+PDCSI_NODE_LABELER_CONFIGMAP = deploy/kubernetes/overlays/node-labeler/configmap.yaml
 
 help: ## Display help
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z_0-9-]+:.*?##/ { printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
 
 presubmit: toolchain verify ci ## Run all steps in the developer loop
-ci: verify-codegen verify-deadcode chart-lint ut-test docs-lint ## Steps run in CI (toolchain and lint handled by dedicated workflow steps)
+ci: verify-codegen verify-deadcode chart-lint verify-crds ut-test docs-lint ## Steps run in CI (toolchain and lint handled by dedicated workflow steps)
 
 toolchain: ## Install developer toolchain
 	cd hack/tools && go install tool
+	cd hack/crd-tools && go install tool
 
 run: ## Run Karpenter controller binary against your local cluster
 	SYSTEM_NAMESPACE=${KARPENTER_NAMESPACE} \
@@ -43,6 +47,7 @@ run: ## Run Karpenter controller binary against your local cluster
 		go run ./cmd/controller/main.go
 
 update: tidy download ## Update go files header, CRD and generated code
+	$(MAKE) update-pdcsi-compatibility
 	hack/boilerplate.sh
 	hack/update-generated.sh
 	hack/docs-generate.sh
@@ -55,6 +60,12 @@ verify-codegen: update ## Verify generated code is up to date
 chart-lint: ## Lint the Helm charts (validates values.schema.json and templates)
 	helm lint charts/karpenter/
 	helm lint charts/karpenter-crd/
+
+verify-crds: ## Validate generated CRDs with Kubernetes API server validation logic
+	@tmpdir=$$(mktemp -d); \
+	trap 'rm -rf "$$tmpdir"' EXIT; \
+	helm template karpenter-crd charts/karpenter-crd --include-crds > "$$tmpdir/karpenter-crd.yaml"; \
+	(cd hack/crd-tools && go tool kubectl-validate --version 1.35 ../../charts/karpenter/crds/ "$$tmpdir")
 
 verify: ## Verify code. Includes linting, formatting, etc
 	@command -v golangci-lint >/dev/null 2>&1 || (echo "golangci-lint not found — install it from https://golangci-lint.run/welcome/install/" && exit 1)
@@ -105,8 +116,10 @@ E2E_SA_PATH      ?=
 E2E_LOCATION     ?=
 E2E_PREFIX       ?= karpenter-e2e
 E2E_REGION       ?= us-central1
-E2E_CLUSTER_NAME ?= $(E2E_PREFIX)-cluster
-E2E_PODS_RANGE   ?= $(E2E_PREFIX)-pods
+E2E_CLUSTER_NAME         ?= $(E2E_PREFIX)-cluster
+E2E_PODS_RANGE           ?= $(E2E_PREFIX)-pods
+E2E_KARPENTER_NAMESPACE  ?=
+E2E_KARPENTER_DEPLOYMENT ?=
 
 e2e-setup: require-e2e-vars ## Create (or reuse) the e2e GKE cluster and supporting GCP infra
 	GOOGLE_APPLICATION_CREDENTIALS=$(E2E_SA_PATH) \
@@ -138,6 +151,8 @@ e2e-tests: require-e2e-vars ## Run all e2e test suites in parallel (GINKGO_PROCS
 	CLUSTER_NAME=$(E2E_CLUSTER_NAME) \
 	CLUSTER_LOCATION=$(E2E_LOCATION) \
 	PODS_RANGE_NAME=$(E2E_PODS_RANGE) \
+	KARPENTER_NAMESPACE=$(E2E_KARPENTER_NAMESPACE) \
+	KARPENTER_DEPLOYMENT=$(E2E_KARPENTER_DEPLOYMENT) \
 	go run github.com/onsi/ginkgo/v2/ginkgo --procs=$(GINKGO_PROCS) --timeout=2h -v $(GINKGO_ARGS) ./test/suites/...
 
 FOCUS ?=
@@ -148,6 +163,8 @@ e2e-test: require-e2e-vars ## Run a single e2e suite or focused spec (SUITE=<nam
 	CLUSTER_NAME=$(E2E_CLUSTER_NAME) \
 	CLUSTER_LOCATION=$(E2E_LOCATION) \
 	PODS_RANGE_NAME=$(E2E_PODS_RANGE) \
+	KARPENTER_NAMESPACE=$(E2E_KARPENTER_NAMESPACE) \
+	KARPENTER_DEPLOYMENT=$(E2E_KARPENTER_DEPLOYMENT) \
 	go run github.com/onsi/ginkgo/v2/ginkgo --procs=$(GINKGO_PROCS) --timeout=30m -v $(GINKGO_ARGS) \
 	$(if $(FOCUS),--focus="$(FOCUS)",) \
 	$(if $(SUITE),./test/suites/$(SUITE)/,./test/suites/...)
@@ -175,6 +192,12 @@ tidy: ## Run "go mod tidy"
 download: ## Run "go mod download"
 	go mod download
 
+update-pdcsi-compatibility: ## Update vendored PDCSI disk compatibility data from the pinned Go module
+	@cd $(PDCSI_DATA_DIR) && go mod download $(PDCSI_MODULE)
+	@src="$$(cd $(PDCSI_DATA_DIR) && go list -mod=mod -m -f '{{ .Dir }}' $(PDCSI_MODULE))/$(PDCSI_NODE_LABELER_CONFIGMAP)"; \
+		test -f "$$src" || (echo "PDCSI node-labeler ConfigMap not found at $$src" >&2; exit 1); \
+		cp "$$src" pkg/providers/disktype/pdcsi/node-labeler-configmap.yaml
+
 update-pricing:
 	@tmpdir=$$(mktemp -d); \
 	trap "rm -rf $$tmpdir" EXIT; \
@@ -188,7 +211,7 @@ codegen: ## Auto generate files based on GCP APIs
 crds: ## Apply CRDs
 	kubectl apply -f charts/karpenter/crds/
 
-.PHONY: help presubmit ci run ut-test require-project-id e2e-setup e2e-tests e2e-test e2e-teardown e2e-check-clean e2e-deploy coverage update update-pricing verify-codegen verify verify-deadcode image apply delete toolchain tidy download docs-lint docs-fix
+.PHONY: help presubmit ci run ut-test require-project-id e2e-setup e2e-tests e2e-test e2e-teardown e2e-check-clean e2e-deploy coverage update update-pdcsi-compatibility update-pricing verify-codegen verify verify-crds verify-deadcode image apply delete toolchain tidy download docs-lint docs-fix
 
 define newline
 

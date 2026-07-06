@@ -18,7 +18,9 @@ package instancetype
 
 import (
 	"context"
+	"strings"
 	"testing"
+	"time"
 
 	"cloud.google.com/go/compute/apiv1/computepb"
 	"github.com/samber/lo"
@@ -74,12 +76,12 @@ func TestListEphemeralStorageCacheIsolation(t *testing.T) {
 		"200 GiB disk should produce 76 Gi kubeReserved ephemeral-storage")
 	assert.Equal(t, int64(15)*1024*1024*1024, ephemeral30.Value(),
 		"30 GiB disk should produce 15 Gi kubeReserved ephemeral-storage, not the cached 76 Gi")
-	assert.Equal(t, 2, p.instanceTypesCache.ItemCount(),
+	assert.Equal(t, 2, p.staticInstanceTypesCache.ItemCount(),
 		"each distinct disk config must produce a separate cache entry")
 }
 
 // TestListCacheKeyCoversLocalSsdMode verifies that switching LocalSsdMode
-// (RawBlock↔Ephemeral) must NOT reuse a cached List entry, since the mode
+// (RawBlock↔Ephemeral) must NOT reuse a cached static entry, since the mode
 // flips capacity/overhead semantics. Per-count InstanceType variants are
 // emitted inside a single List result by ssdCountVariants, not by re-listing
 // per-NodeClass.
@@ -99,8 +101,98 @@ func TestListCacheKeyCoversLocalSsdMode(t *testing.T) {
 	_, err = p.List(ctx, eph)
 	assert.NoError(t, err)
 
-	assert.Equal(t, 2, p.instanceTypesCache.ItemCount(),
-		"different LocalSsdMode must produce different cache entries")
+	assert.Equal(t, 2, p.staticInstanceTypesCache.ItemCount(),
+		"different LocalSsdMode must produce different static cache entries")
+}
+
+func TestListUnavailableOfferingsDoNotGrowStaticCache(t *testing.T) {
+	ctx := options.ToContext(context.Background(), &options.Options{VMMemoryOverheadPercent: 0.07})
+	p := newTestProvider()
+	nodeClass := &v1alpha1.GCENodeClass{}
+
+	first, err := p.List(ctx, nodeClass)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, first)
+	assert.True(t, spotOfferingAvailable(first[0].Offerings))
+
+	p.unavailableOfferings.MarkUnavailable(ctx, "ICE", "n2-standard-4", "us-central1-a", karpv1.CapacityTypeSpot)
+
+	second, err := p.List(ctx, nodeClass)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, second)
+	assert.False(t, spotOfferingAvailable(second[0].Offerings))
+	assert.Equal(t, 1, p.staticInstanceTypesCache.ItemCount(),
+		"unavailable offering changes must not create new static instance type cache entries")
+}
+
+func TestListRebuildsRequirementsWithInjectedOfferings(t *testing.T) {
+	ctx := options.ToContext(context.Background(), &options.Options{VMMemoryOverheadPercent: 0.07})
+	p := newTestProvider()
+	nodeClass := &v1alpha1.GCENodeClass{}
+
+	first, err := p.List(ctx, nodeClass)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, first)
+	assert.Contains(t, first[0].Requirements.Get(karpv1.CapacityTypeLabelKey).Values(), karpv1.CapacityTypeSpot)
+
+	p.unavailableOfferings.MarkUnavailable(ctx, "ICE", "n2-standard-4", "us-central1-a", karpv1.CapacityTypeSpot)
+
+	second, err := p.List(ctx, nodeClass)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, second)
+	assert.NotContains(t, second[0].Requirements.Get(karpv1.CapacityTypeLabelKey).Values(), karpv1.CapacityTypeSpot)
+	assert.Contains(t, second[0].Requirements.Get(karpv1.CapacityTypeLabelKey).Values(), karpv1.CapacityTypeOnDemand)
+}
+
+func TestListUnavailableOfferingExpiryDoesNotGrowStaticCache(t *testing.T) {
+	ctx := options.ToContext(context.Background(), &options.Options{VMMemoryOverheadPercent: 0.07})
+	p := newTestProvider()
+	nodeClass := &v1alpha1.GCENodeClass{}
+
+	p.unavailableOfferings.MarkUnavailableWithTTL(ctx, "ICE", "n2-standard-4", "us-central1-a", karpv1.CapacityTypeSpot, time.Millisecond)
+
+	unavailable, err := p.List(ctx, nodeClass)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, unavailable)
+	assert.False(t, spotOfferingAvailable(unavailable[0].Offerings))
+
+	time.Sleep(2 * time.Millisecond)
+
+	available, err := p.List(ctx, nodeClass)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, available)
+	assert.True(t, spotOfferingAvailable(available[0].Offerings))
+	assert.Equal(t, 1, p.staticInstanceTypesCache.ItemCount(),
+		"unavailable offering expiry must not create new static instance type cache entries")
+}
+
+func TestListDoesNotMutatePreviousResults(t *testing.T) {
+	ctx := options.ToContext(context.Background(), &options.Options{VMMemoryOverheadPercent: 0.07})
+	p := newTestProvider()
+	nodeClass := &v1alpha1.GCENodeClass{}
+
+	first, err := p.List(ctx, nodeClass)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, first)
+	assert.True(t, spotOfferingAvailable(first[0].Offerings))
+
+	p.unavailableOfferings.MarkUnavailable(ctx, "ICE", "n2-standard-4", "us-central1-a", karpv1.CapacityTypeSpot)
+
+	second, err := p.List(ctx, nodeClass)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, second)
+	assert.False(t, spotOfferingAvailable(second[0].Offerings))
+	assert.True(t, spotOfferingAvailable(first[0].Offerings),
+		"later List calls must not mutate previously returned instance types")
+}
+
+func spotOfferingAvailable(offerings cloudprovider.Offerings) bool {
+	for _, offering := range offerings {
+		if offering.Requirements.Get(karpv1.CapacityTypeLabelKey).Any() == karpv1.CapacityTypeSpot {
+			return offering.Available
+		}
+	}
+	return false
 }
 
 func TestCalculateDiskConfiguration(t *testing.T) {
@@ -386,6 +478,34 @@ func TestNewInstanceTypeModeAware(t *testing.T) {
 			assert.Equal(t, tc.wantReservedGiB*GiB, res.Value(), "ephemeral-storage kubeReserved")
 		})
 	}
+}
+
+func TestComputeRequirementsIncludesDiskTypeCompatibility(t *testing.T) {
+	requirements := computeRequirements(&computepb.MachineType{
+		Name:      lo.ToPtr("e2-standard-4"),
+		GuestCpus: lo.ToPtr[int32](4),
+		MemoryMb:  lo.ToPtr[int32](16384),
+	}, cloudprovider.Offerings{{
+		Available: true,
+		Requirements: scheduling.NewRequirements(
+			scheduling.NewRequirement(corev1.LabelTopologyZone, corev1.NodeSelectorOpIn, "us-central1-a"),
+			scheduling.NewRequirement(karpv1.CapacityTypeLabelKey, corev1.NodeSelectorOpIn, karpv1.CapacityTypeOnDemand),
+		),
+	}}, "us-central1", 0)
+
+	assert.Equal(t, corev1.NodeSelectorOpIn, requirements.Get("disk-type.gke.io/pd-balanced").Operator())
+	assert.Equal(t, []string{"true"}, requirements.Get("disk-type.gke.io/pd-balanced").Values())
+	assert.Equal(t, corev1.NodeSelectorOpDoesNotExist, requirements.Get("disk-type.gke.io/hyperdisk-throughput").Operator())
+
+	supportedVolumeRequirement := scheduling.NewRequirements(
+		scheduling.NewRequirement("disk-type.gke.io/pd-balanced", corev1.NodeSelectorOpIn, "true"),
+	)
+	unsupportedVolumeRequirement := scheduling.NewRequirements(
+		scheduling.NewRequirement("disk-type.gke.io/hyperdisk-throughput", corev1.NodeSelectorOpIn, "true"),
+	)
+
+	assert.NoError(t, requirements.Intersects(supportedVolumeRequirement))
+	assert.Error(t, requirements.Intersects(unsupportedVolumeRequirement))
 }
 
 func TestComputeRequirements(t *testing.T) {
@@ -846,6 +966,11 @@ func TestComputeRequirements(t *testing.T) {
 				if _, ok := tt.expected[key]; !ok {
 					// Ignore LabelTopologyZoneID if it wasn't expected (due to auto-generation with random values)
 					if key == v1alpha1.LabelTopologyZoneID {
+						continue
+					}
+					// disk-type.gke.io/* emissions are table-driven per machine
+					// type and covered by the dedicated disktype test.
+					if strings.HasPrefix(key, "disk-type.gke.io/") {
 						continue
 					}
 					t.Errorf("Unexpected key in result: %s", key)

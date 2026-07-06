@@ -125,6 +125,25 @@ disks:
 
 ---
 
+## Confidential VM rejected by GCE
+
+Confidential VM is only supported on specific machine families. See the [GCP support matrix](https://cloud.google.com/confidential-computing/confidential-vm/docs/os-and-machine-type) for which families support which confidential type. If `confidentialInstanceType` is set on a `GCENodeClass` whose requirements admit incompatible families, GCE rejects the instance create call and the error appears on the `NodeClaim` `Launched` condition.
+
+Constrain the family in the matching `NodePool` requirements. Example:
+
+```yaml
+requirements:
+  - key: karpenter.k8s.gcp/instance-family
+    operator: In
+    values: [n2d]
+```
+
+Karpenter also forces `scheduling.onHostMaintenance` to `TERMINATE` for these instances because Confidential VMs cannot live-migrate.
+
+The default `ContainerOptimizedOS` and `Ubuntu` images work for CPU Confidential VMs. GPU Confidential VMs (an A3 instance with an attached H100 GPU using Intel TDX) require a TDX-specific image that the `family` image selectors do not provide; pin one by its full resource URL with `imageSelectorTerms[].id` per the [GCP supported configurations](https://cloud.google.com/confidential-computing/confidential-vm/docs/supported-configurations#supported-images-gpu).
+
+---
+
 ## arm64 provisioning not available
 
 arm64 node provisioning may be unavailable if the cluster's region does not support arm64 machine types. Check Karpenter startup logs for related messages.
@@ -138,6 +157,32 @@ To verify arm64 machine types are available in your cluster's region:
 ```sh
 gcloud compute machine-types list --zones=ZONE --filter="architecture:ARM64"
 ```
+
+---
+
+## Idle node not being removed
+
+Empty-node removal is handled entirely by Karpenter's upstream disruption controller — the GCP provider no longer runs a separate empty-node cleanup loop. A node is removed automatically only when it is empty or underutilized according to the matching NodePool's `spec.disruption` settings.
+
+If an idle node is not being removed, check the following:
+
+- **`consolidateAfter` and disruption budgets.** Karpenter waits for `consolidateAfter` to elapse before disrupting a node, and disruption budgets can block or rate-limit removals. A budget that sets `nodes: "0"` for the `Empty` reason prevents empty-node removal entirely. Review the NodePool's `spec.disruption` to confirm the timing and budgets are what you expect.
+
+- **`consolidationPolicy`.** `WhenEmpty` removes only nodes that have no reschedulable pods. A node that still runs a Deployment-owned system pod — such as the GKE `konnectivity-agent` — is not considered empty by Karpenter core, because the pod is not DaemonSet overhead. Such a node remains until it can be consolidated as underutilized. Use `WhenEmptyOrUnderutilized` if you want Karpenter to consider removing or replacing these lightly loaded nodes.
+
+  ```yaml
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 30s
+  ```
+
+Check the current disruption settings on your NodePools with:
+
+```sh
+kubectl get nodepools -o yaml
+```
+
+See the [NodePool disruption reference](reference/nodepool.md#disruption) for the full list of settings.
 
 ---
 
@@ -180,3 +225,29 @@ To increase provisioning success:
   ```
 
 - Allow both spot and on-demand to let Karpenter fall back automatically.
+
+---
+
+## Zone mismatch errors
+
+Karpenter provisions nodes only in zones configured for your GKE cluster. If a NodePool's `topology.kubernetes.io/zone` requirement specifies zones outside the cluster's configured locations, provisioning fails with an error like:
+
+```
+no zones match topology requirement "topology.kubernetes.io/zone"; requested zones europe-west4-b, configured GKE cluster locations europe-west4-a,europe-west4-c
+```
+
+Common cause:
+
+- The NodePool requirement lists zones not in the cluster's node locations. Zonal clusters can use multiple node locations, but the requested zones must be configured on the cluster.
+
+To resolve:
+
+1. Check your cluster's configured node locations:
+
+   ```sh
+   gcloud container clusters describe CLUSTER_NAME \
+     --location=CLUSTER_LOCATION \
+     --format="value(locations)"
+   ```
+
+2. Update the NodePool `topology.kubernetes.io/zone` requirement to match available zones, or remove the requirement to let Karpenter use any configured cluster zone.

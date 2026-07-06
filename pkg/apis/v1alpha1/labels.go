@@ -26,6 +26,7 @@ import (
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/apis"
+	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/disktype"
 )
 
 func init() {
@@ -47,13 +48,14 @@ func init() {
 		LabelTopologyZoneID,
 		corev1.LabelWindowsBuild,
 		LabelGKEReadinessCalicoReady,
-		LabelGKEReadinessKubeProxyReady,
 		LabelGKEReadinessMetadataServerEnabled,
 		LabelGKEReadinessMasqAgentReady,
 		LabelGKEReadinessNetdReady,
 		LabelGKEReadinessNodeLocalDNSReady,
 		LabelGKEAccelerator,
+		LabelGKECPUScalingLevel,
 	)
+	karpv1.WellKnownLabels = karpv1.WellKnownLabels.Insert(disktype.AllLabels()...)
 }
 
 var (
@@ -99,13 +101,30 @@ var (
 	// until the node is ready for each subsystem. Registering them as well-known
 	// allows Karpenter's DaemonSet overhead simulation (isDaemonPodCompatible) to
 	// include these DaemonSets when sizing instance types, preventing undersizing
-	// and node churn. See https://github.com/cloudpilot-ai/karpenter-provider-gcp/issues/202
+	// and node churn. kube-proxy is intentionally not registered or injected by
+	// the provider: GKE supplies a node-owned mirror pod on Karpenter nodes, and
+	// treating the DaemonSet selector as compatible would double-count or run a
+	// second kube-proxy pod.
+	// See https://github.com/cloudpilot-ai/karpenter-provider-gcp/issues/202
 	LabelGKEReadinessCalicoReady           = "projectcalico.org/ds-ready"
 	LabelGKEReadinessKubeProxyReady        = "node.kubernetes.io/kube-proxy-ds-ready"
 	LabelGKEReadinessMetadataServerEnabled = "iam.gke.io/gke-metadata-server-enabled"
 	LabelGKEReadinessMasqAgentReady        = "node.kubernetes.io/masq-agent-ds-ready"
 	LabelGKEReadinessNetdReady             = "cloud.google.com/gke-netd-ready"
 	LabelGKEReadinessNodeLocalDNSReady     = "addon.gke.io/node-local-dns-ds-ready"
+
+	// GKEReadinessLabelKeys are the GKE readiness-gate label keys that Karpenter
+	// preserves from the source instance template when building a provisioned node's
+	// labels. GKE sets the cluster-appropriate subset on the template; the DaemonSets
+	// they gate (ip-masq-agent, calico, etc.) only schedule on nodes carrying them.
+	GKEReadinessLabelKeys = []string{
+		LabelGKEReadinessCalicoReady,
+		LabelGKEReadinessKubeProxyReady,
+		LabelGKEReadinessMetadataServerEnabled,
+		LabelGKEReadinessMasqAgentReady,
+		LabelGKEReadinessNetdReady,
+		LabelGKEReadinessNodeLocalDNSReady,
+	}
 
 	// LabelGKEAccelerator is the GPU accelerator type label required by the NVIDIA device plugin
 	// DaemonSet's nodeAffinity. GKE injects it on native GPU node pools; Karpenter must inject
@@ -114,6 +133,9 @@ var (
 	// LabelGKEGPUDriverVersion is the kube-labels key read by GKE's GPU driver installer DaemonSet
 	// to decide which NVIDIA driver version to install. Corresponds to GCENodeClass.spec.gpuDriverVersion.
 	LabelGKEGPUDriverVersion = "cloud.google.com/gke-gpu-driver-version"
+	// LabelGKECPUScalingLevel is used by GKE's NVIDIA device-plugin DaemonSets to
+	// select the small/medium/large plugin variant for GPU nodes.
+	LabelGKECPUScalingLevel = "cloud.google.com/gke-cpu-scaling-level"
 
 	LabelNodeClass               = apis.Group + "/gcenodeclass"
 	LabelTopologyZoneID          = "topology.k8s.gcp/zone-id"

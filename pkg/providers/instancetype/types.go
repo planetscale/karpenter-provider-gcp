@@ -32,9 +32,15 @@ import (
 
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/apis/v1alpha1"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/operator/options"
+	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/disktype"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/utils"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/utils/localssd"
 )
+
+// staticKubeProxyCPUMilliCore matches the CPU request on GKE's node-owned
+// kube-proxy mirror pod observed on GKE 1.35.5 COS ARM64 Karpenter nodes.
+// Re-check this constant when GKE changes kube-proxy resource requests.
+const staticKubeProxyCPUMilliCore = 100
 
 // NewInstanceType builds a single InstanceType variant for the given machine
 // type and local-SSD count. Callers in instancetype.List emit one variant per
@@ -46,6 +52,16 @@ func NewInstanceType(ctx context.Context, mt *computepb.MachineType, nodeClass *
 		return nil
 	}
 
+	it := NewStaticInstanceType(ctx, mt, nodeClass, ssdCount)
+	if it == nil {
+		return nil
+	}
+	it.Requirements = computeRequirements(mt, offerings, region, ssdCount)
+	it.Offerings = offerings
+	return it
+}
+
+func NewStaticInstanceType(ctx context.Context, mt *computepb.MachineType, nodeClass *v1alpha1.GCENodeClass, ssdCount int) *cloudprovider.InstanceType {
 	bootDiskGiB, totalSSDGiB := calculateDiskConfigGiB(nodeClass, mt, ssdCount)
 
 	// Only Ephemeral mode mounts local SSDs as the kubelet's ephemeral-storage
@@ -84,23 +100,39 @@ func NewInstanceType(ctx context.Context, mt *computepb.MachineType, nodeClass *
 		"ephemeralEviction", ephemeralEviction,
 		"ephemeralSystem", ephemeralSystem)
 
+	kc := nodeClass.Spec.KubeletConfiguration
+
+	computedKubeReserved := corev1.ResourceList{
+		corev1.ResourceCPU:              *resource.NewMilliQuantity(reservedCPU, resource.DecimalSI),
+		corev1.ResourceMemory:           *resource.NewQuantity(reservedMemory*1024*1024, resource.BinarySI),
+		corev1.ResourceEphemeralStorage: *resource.NewQuantity(ephemeralSystem*1024*1024*1024, resource.BinarySI),
+	}
+	// GKE creates a node-owned kube-proxy mirror pod on Karpenter nodes. The provider
+	// no longer injects the kube-proxy DaemonSet readiness label, so only the mirror
+	// pod runs. Mirror pods are not part of Karpenter's daemon overhead simulation,
+	// so account for the mirror pod's CPU request here as provider overhead. Using
+	// SystemReserved (rather than KubeReserved) keeps this value out of kubelet
+	// kubeReserved metadata, avoiding a double reduction of allocatable on top of the
+	// mirror pod's own scheduling request.
+	computedSystemReserved := corev1.ResourceList{
+		corev1.ResourceCPU: *resource.NewMilliQuantity(staticKubeProxyCPUMilliCore, resource.DecimalSI),
+	}
+	computedEviction := corev1.ResourceList{
+		corev1.ResourceMemory:           *resource.NewQuantity(evictionMemory*1024*1024, resource.BinarySI),
+		corev1.ResourceEphemeralStorage: *resource.NewQuantity(ephemeralEviction*1024*1024*1024, resource.BinarySI),
+	}
+	memoryQuantity := memory(ctx, mt)
+	storageQuantity := resource.NewQuantity(totalStorageBytes, resource.BinarySI)
+
 	overhead := cloudprovider.InstanceTypeOverhead{
-		KubeReserved: corev1.ResourceList{
-			corev1.ResourceCPU:              *resource.NewMilliQuantity(reservedCPU, resource.DecimalSI),
-			corev1.ResourceMemory:           *resource.NewQuantity(reservedMemory*1024*1024, resource.BinarySI),
-			corev1.ResourceEphemeralStorage: *resource.NewQuantity(ephemeralSystem*1024*1024*1024, resource.BinarySI),
-		},
-		EvictionThreshold: corev1.ResourceList{
-			corev1.ResourceMemory:           *resource.NewQuantity(evictionMemory*1024*1024, resource.BinarySI),
-			corev1.ResourceEphemeralStorage: *resource.NewQuantity(ephemeralEviction*1024*1024*1024, resource.BinarySI),
-		},
-		SystemReserved: corev1.ResourceList{},
+		KubeReserved:      mergeKubeReserved(computedKubeReserved, kc),
+		SystemReserved:    kcSystemReserved(computedSystemReserved, kc),
+		EvictionThreshold: evictionThreshold(memoryQuantity, storageQuantity, computedEviction, kc),
 	}
 
 	it := &cloudprovider.InstanceType{
 		Name:         lo.FromPtr(mt.Name),
-		Requirements: computeRequirements(mt, offerings, region, ssdCount),
-		Offerings:    offerings,
+		Requirements: scheduling.NewRequirements(),
 		Capacity:     computeCapacity(ctx, mt, nodeClass, totalStorageBytes),
 		Overhead:     &overhead,
 	}
@@ -152,6 +184,15 @@ func computeRequirements(mt *computepb.MachineType, offerings cloudprovider.Offe
 		scheduling.NewRequirement(v1alpha1.LabelGKEAccelerator, corev1.NodeSelectorOpDoesNotExist),
 	)
 	requirements.Add(localSSDCountRequirement(ssdCount))
+	for _, label := range disktype.AllLabels() {
+		requirements.Add(scheduling.NewRequirement(label, corev1.NodeSelectorOpDoesNotExist))
+	}
+	if diskLabels, ok := disktype.LabelsForInstanceType(lo.FromPtr(mt.Name)); ok {
+		for label := range diskLabels {
+			requirements.Get(label).Insert("true")
+		}
+	}
+
 	// Only add zone-id label when available in offerings. It may not be available if a user has upgraded from a
 	// previous version of Karpenter w/o zone-id support and the nodeclass vswitch status has not yet updated.
 	if zoneIDs := lo.FilterMap(offerings.Available(), func(o *cloudprovider.Offering, _ int) (string, bool) {
@@ -232,10 +273,11 @@ func machineTypeArch(mt *computepb.MachineType) string {
 }
 
 func computeCapacity(ctx context.Context, mt *computepb.MachineType, nodeClass *v1alpha1.GCENodeClass, totalStorageBytes int64) corev1.ResourceList {
+	maxPods := kcMaxPods(nodeClass.GetMaxPods(), nodeClass.Spec.KubeletConfiguration, int64(mt.GetGuestCpus()))
 	resourceList := corev1.ResourceList{
 		corev1.ResourceCPU:              *cpu(mt),
 		corev1.ResourceMemory:           *memory(ctx, mt),
-		corev1.ResourcePods:             *resource.NewQuantity(int64(nodeClass.GetMaxPods()), resource.DecimalSI),
+		corev1.ResourcePods:             *resource.NewQuantity(maxPods, resource.DecimalSI),
 		corev1.ResourceEphemeralStorage: *resource.NewQuantity(totalStorageBytes, resource.BinarySI),
 		v1alpha1.ResourceNVIDIAGPU:      *resource.NewQuantity(int64(len(mt.GetAccelerators())), resource.DecimalSI),
 	}
