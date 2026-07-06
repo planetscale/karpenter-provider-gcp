@@ -83,12 +83,14 @@ func runConsolidationTest(ctx context.Context, tc environment.TestCase) {
 	// Mark as gone so DeferCleanup skips the redundant WaitForNodeRemoval.
 	provisionedNodeName = ""
 
-	// NodePool and NodeClass must still exist — consolidation removed the node,
-	// it did not delete the pool.
-	claims, err := env.ListNodeClaims(ctx)
-	Expect(err).NotTo(HaveOccurred())
-	for _, c := range claims {
-		Expect(c.GetLabels()[karpv1.NodePoolLabelKey]).NotTo(Equal(name),
-			"unexpected NodeClaim for nodePool %s after consolidation", name)
-	}
+	// The NodeClaim's finalizer outlives the Node object during termination, so
+	// poll until no NodeClaim for this pool remains rather than checking once.
+	Eventually(func(g Gomega) {
+		claims, err := env.ListNodeClaims(ctx)
+		g.Expect(err).NotTo(HaveOccurred())
+		for _, c := range claims {
+			g.Expect(c.GetLabels()[karpv1.NodePoolLabelKey]).NotTo(Equal(name),
+				"NodeClaim for nodePool %s still present after consolidation", name)
+		}
+	}).WithTimeout(2 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
 }
