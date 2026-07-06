@@ -2310,3 +2310,98 @@ func TestConfidentialInstanceType(t *testing.T) {
 		})
 	}
 }
+
+// TestPatchLocalSSDMetadata verifies the kube-env / node-label contract the
+// GKE bootstrapper depends on: RawBlock advertises "<count>,nvme,block" via
+// NODE_LOCAL_SSDS_EXT, Ephemeral advertises NODE_LOCAL_SSDS_EPHEMERAL=true,
+// each mode drops the other mode's key inherited from the source template,
+// and count 0 leaves the metadata untouched.
+func TestPatchLocalSSDMetadata(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name          string
+		mode          v1alpha1.LocalSSDMode
+		count         int
+		sourceKubeEnv string
+		wantEnv       []string
+		wantNotEnv    []string
+		wantLabels    []string
+		wantNotLabels []string
+	}{
+		{
+			name:          "RawBlock count 4",
+			mode:          v1alpha1.LocalSSDModeRawBlock,
+			count:         4,
+			wantEnv:       []string{"NODE_LOCAL_SSDS_EXT: 4,nvme,block"},
+			wantNotEnv:    []string{"NODE_LOCAL_SSDS_EPHEMERAL"},
+			wantLabels:    []string{"cloud.google.com/gke-local-nvme-ssd=true"},
+			wantNotLabels: []string{"cloud.google.com/gke-ephemeral-storage-local-ssd"},
+		},
+		{
+			name:          "empty mode defaults to RawBlock",
+			mode:          "",
+			count:         2,
+			wantEnv:       []string{"NODE_LOCAL_SSDS_EXT: 2,nvme,block"},
+			wantLabels:    []string{"cloud.google.com/gke-local-nvme-ssd=true"},
+			wantNotLabels: []string{"cloud.google.com/gke-ephemeral-storage-local-ssd"},
+		},
+		{
+			name:          "Ephemeral drops inherited EXT key",
+			mode:          v1alpha1.LocalSSDModeEphemeral,
+			count:         2,
+			sourceKubeEnv: "NODE_LOCAL_SSDS_EXT: 8,nvme,block\n",
+			wantEnv:       []string{"NODE_LOCAL_SSDS_EPHEMERAL: true"},
+			wantNotEnv:    []string{"NODE_LOCAL_SSDS_EXT"},
+			wantLabels:    []string{"cloud.google.com/gke-ephemeral-storage-local-ssd=true"},
+			wantNotLabels: []string{"cloud.google.com/gke-local-nvme-ssd"},
+		},
+		{
+			name:          "count 0 is a no-op",
+			mode:          v1alpha1.LocalSSDModeRawBlock,
+			count:         0,
+			wantNotEnv:    []string{"NODE_LOCAL_SSDS_EXT", "NODE_LOCAL_SSDS_EPHEMERAL"},
+			wantNotLabels: []string{"cloud.google.com/gke-local-nvme-ssd", "cloud.google.com/gke-ephemeral-storage-local-ssd"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			source := computeMetadataValues(map[string]string{
+				metadata.KubeEnvKey:    tc.sourceKubeEnv,
+				metadata.KubeLabelsKey: "",
+			})
+			target, err := metadata.FromSourceTemplate(source)
+			require.NoError(t, err)
+
+			nc := &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{LocalSsdMode: tc.mode}}
+			patchLocalSSDMetadata(target, nc, tc.count)
+
+			rendered, err := target.ToComputeMetadata()
+			require.NoError(t, err)
+			var kubeEnv, kubeLabels string
+			for _, item := range rendered.Items {
+				switch item.Key {
+				case metadata.KubeEnvKey:
+					kubeEnv = ptr.Deref(item.Value, "")
+				case metadata.KubeLabelsKey:
+					kubeLabels = ptr.Deref(item.Value, "")
+				}
+			}
+			for _, want := range tc.wantEnv {
+				require.Contains(t, kubeEnv, want)
+			}
+			for _, notWant := range tc.wantNotEnv {
+				require.NotContains(t, kubeEnv, notWant)
+			}
+			for _, want := range tc.wantLabels {
+				require.Contains(t, kubeLabels, want)
+			}
+			for _, notWant := range tc.wantNotLabels {
+				require.NotContains(t, kubeLabels, notWant)
+			}
+		})
+	}
+}
