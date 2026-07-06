@@ -37,20 +37,20 @@ var _ = DescribeTable("Local SSD",
 	},
 	// Bundled-SSD families: SSD count is fixed by the machine type;
 	// LocalSsdMode still controls exposure.
-	Entry("bundled c4d-standard-8-lssd / RawBlock", environment.TestCase{
+	Entry("bundled c4-standard-8-lssd / RawBlock", environment.TestCase{
 		CapacityType:         karpv1.CapacityTypeOnDemand,
 		Arch:                 karpv1.ArchitectureAmd64,
-		Families:             []string{"c4d"},
-		InstanceTypes:        []string{"c4d-standard-8-lssd"},
+		Families:             []string{"c4"},
+		InstanceTypes:        []string{"c4-standard-8-lssd"},
 		BootDiskCategory:     "hyperdisk-balanced",
 		LocalSSDMode:         gcpv1alpha1.LocalSSDModeRawBlock,
 		ExpectedScratchDisks: 1,
 	}, SpecTimeout(15*time.Minute)),
-	Entry("bundled c4d-standard-8-lssd / Ephemeral", environment.TestCase{
+	Entry("bundled c4-standard-8-lssd / Ephemeral", environment.TestCase{
 		CapacityType:         karpv1.CapacityTypeOnDemand,
 		Arch:                 karpv1.ArchitectureAmd64,
-		Families:             []string{"c4d"},
-		InstanceTypes:        []string{"c4d-standard-8-lssd"},
+		Families:             []string{"c4"},
+		InstanceTypes:        []string{"c4-standard-8-lssd"},
 		BootDiskCategory:     "hyperdisk-balanced",
 		LocalSSDMode:         gcpv1alpha1.LocalSSDModeEphemeral,
 		ExpectedScratchDisks: 1,
@@ -98,7 +98,7 @@ var _ = DescribeTable("Local SSD",
 	// count (c4-*-lssd bundles 1), so the label assertion alone can't tell
 	// whether the label came from the pod's request or from the resolver
 	// reading bundled count. Bundled-count label propagation is independently
-	// asserted by the `bundled c4d-standard-8-lssd` and `bundled
+	// asserted by the `bundled c4-standard-8-lssd` and `bundled
 	// c4a-standard-4-lssd` entries above, where no pod-side count is set.
 	Entry("family=c4a + pod SSD-count=1 / picks lssd variant", environment.TestCase{
 		CapacityType:         karpv1.CapacityTypeOnDemand,
