@@ -676,7 +676,7 @@ func (p *DefaultProvider) findTemplateByNodePoolName(ctx context.Context, nodePo
 // authoritative from the scheduler / requirement path, and emitting one
 // SCRATCH per entry on top of ssdCount would double-attach.
 func (p *DefaultProvider) renderDiskProperties(instanceType *cloudprovider.InstanceType,
-	nodeClass *v1alpha1.GCENodeClass, zone string, ssdCount int,
+	nodeClass *v1alpha1.GCENodeClass, zone string, ssdCount int, mt *computepb.MachineType,
 ) ([]*compute.AttachedDisk, error) {
 	disks := nodeClass.Spec.Disks
 	sort.Slice(disks, func(i, j int) bool {
@@ -735,8 +735,14 @@ func (p *DefaultProvider) renderDiskProperties(instanceType *cloudprovider.Insta
 		attachedDisks = append(attachedDisks, attachedDisk)
 	}
 
-	for i := 0; i < ssdCount; i++ {
-		attachedDisks = append(attachedDisks, p.scratchDisk(zone))
+	// Bundled-SSD families (C3/C4*/Z3/A3/A4*) auto-attach their local SSDs by
+	// machine shape. An explicit SCRATCH disk is redundant for the C-series and
+	// rejected outright for Z3 Titanium ("configuration_availability"), so emit
+	// scratch disks only for configurable families that require explicit attach.
+	if !hasBundledLocalSSDs(instanceType.Name, mt) {
+		for i := 0; i < ssdCount; i++ {
+			attachedDisks = append(attachedDisks, p.scratchDisk(zone))
+		}
 	}
 
 	return attachedDisks, nil
@@ -758,7 +764,7 @@ func (p *DefaultProvider) scratchDisk(zone string) *compute.AttachedDisk {
 }
 
 func (p *DefaultProvider) buildInstance(ctx context.Context, nodeClaim *karpv1.NodeClaim, nodeClass *v1alpha1.GCENodeClass, instanceType *cloudprovider.InstanceType, template *compute.InstanceTemplate, clusterConfig *container.Cluster, nodePoolName, zone, instanceName, capacityType string, mt *computepb.MachineType, ssdCount int) (*compute.Instance, error) {
-	attachedDisks, err := p.renderDiskProperties(instanceType, nodeClass, zone, ssdCount)
+	attachedDisks, err := p.renderDiskProperties(instanceType, nodeClass, zone, ssdCount, mt)
 	if err != nil {
 		return nil, fmt.Errorf("rendering disk properties: %w", err)
 	}

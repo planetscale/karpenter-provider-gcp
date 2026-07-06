@@ -576,7 +576,7 @@ func TestRenderDiskProperties_NoProvisioningWhenFieldsAreNil(t *testing.T) {
 	p := &DefaultProvider{projectID: "my-project"}
 	nodeClass := bootDiskNodeClass("pd-ssd", nil, nil)
 
-	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a", 0)
+	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a", 0, nil)
 	require.NoError(t, err)
 
 	require.Len(t, disks, 1)
@@ -590,7 +590,7 @@ func TestRenderDiskProperties_SetsProvisionedIOPS(t *testing.T) {
 	p := &DefaultProvider{projectID: "my-project"}
 	nodeClass := bootDiskNodeClass("pd-extreme", ptr.To(int64(5000)), nil)
 
-	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a", 0)
+	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a", 0, nil)
 	require.NoError(t, err)
 
 	require.Len(t, disks, 1)
@@ -604,7 +604,7 @@ func TestRenderDiskProperties_SetsProvisionedThroughput(t *testing.T) {
 	p := &DefaultProvider{projectID: "my-project"}
 	nodeClass := bootDiskNodeClass("hyperdisk-throughput", nil, ptr.To(int64(500)))
 
-	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a", 0)
+	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a", 0, nil)
 	require.NoError(t, err)
 
 	require.Len(t, disks, 1)
@@ -618,7 +618,7 @@ func TestRenderDiskProperties_SetsBothIOPSAndThroughput(t *testing.T) {
 	p := &DefaultProvider{projectID: "my-project"}
 	nodeClass := bootDiskNodeClass("hyperdisk-balanced", ptr.To(int64(10000)), ptr.To(int64(400)))
 
-	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a", 0)
+	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a", 0, nil)
 	require.NoError(t, err)
 
 	require.Len(t, disks, 1)
@@ -683,7 +683,7 @@ func TestRenderDiskProperties_SsdCountEmitsScratchDisks(t *testing.T) {
 			}
 
 			p := &DefaultProvider{projectID: "my-project"}
-			disks, err := p.renderDiskProperties(amd64InstanceType(), nc, "us-central1-a", tc.ssdCount)
+			disks, err := p.renderDiskProperties(amd64InstanceType(), nc, "us-central1-a", tc.ssdCount, nil)
 			require.NoError(t, err)
 			require.Equal(t, tc.wantScratchCount, countScratch(disks),
 				"expected %d SCRATCH local-SSD disks", tc.wantScratchCount)
@@ -727,7 +727,7 @@ func TestRenderDiskProperties_MultipleDisksSetProvisioningIndependently(t *testi
 		},
 	}
 
-	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a", 0)
+	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a", 0, nil)
 	require.NoError(t, err)
 
 	require.Len(t, disks, 2)
