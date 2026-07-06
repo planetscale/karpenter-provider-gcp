@@ -104,14 +104,14 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `serviceAccount` _string_ | ServiceAccount is the GCP IAM service account email to assign to the instance |  | Pattern: `^[^@]+@(developer\.gserviceaccount\.com\|[^@]+\.iam\.gserviceaccount\.com)$` <br />Optional: \{\} <br /> |
 | `disks` _[Disk](#disk) array_ | Disk defines the disks to attach to the provisioned instance. |  | MaxItems: 10 <br />Optional: \{\} <br /> |
-| `imageSelectorTerms` _[ImageSelectorTerm](#imageselectorterm) array_ | ImageSelectorTerms is a list of or image selector terms. The terms are ORed.<br />Remove or adjust mutual exclusivity rules since there's only one field |  | MaxItems: 30 <br />MinItems: 1 <br />Required: \{\} <br /> |
+| `imageSelectorTerms` _[ImageSelectorTerm](#imageselectorterm) array_ | ImageSelectorTerms is a list of or image selector terms. The terms are ORed. |  | MaxItems: 30 <br />MinItems: 1 <br />Required: \{\} <br /> |
 | `imageFamily` _string_ | ImageFamily dictates the instance template used when generating launch templates.<br />If no ImageSelectorTerms alias is specified, this field is required. |  | Enum: [Ubuntu ContainerOptimizedOS] <br />Optional: \{\} <br /> |
 | `subnetRangeName` _string_ | SubnetRangeName is the name of the subnetwork secondary IPv4 range from which<br />to allocate pod IP addresses (alias IPs for pods). If not specified, the cluster's<br />default pod secondary range (ClusterSecondaryRangeName from the cluster's IP<br />allocation policy) is used. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z]([-a-z0-9]\{0,61\}[a-z0-9])?$` <br />Optional: \{\} <br /> |
 | `kubeletConfiguration` _[KubeletConfiguration](#kubeletconfiguration)_ | KubeletConfiguration defines args to be used when configuring kubelet on provisioned nodes.<br />They are a vswitch of the upstream types, recognizing not all options may be supported.<br />Wherever possible, the types and names should reflect the upstream kubelet types. |  | Optional: \{\} <br /> |
 | `labels` _object (keys:string, values:string)_ | Labels to be applied on GCE VM instance. |  | MaxProperties: 20 <br />Optional: \{\} <br /> |
 | `metadata` _object (keys:string, values:string)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
 | `networkTags` _[NetworkTag](#networktag) array_ | NetworkTags is a list of network tags to apply to the node. |  | MaxItems: 20 <br />MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z]([-a-z0-9]\{0,61\}[a-z0-9])?$` <br />Optional: \{\} <br /> |
-| `shieldedInstanceConfig` _[ShieldedInstanceConfig](#shieldedinstanceconfig)_ | ShieldedInstanceConfig is the Shielded VM configuration for the instance. |  | Optional: \{\} <br /> |
+| `shieldedInstanceConfig` _[ShieldedInstanceConfig](#shieldedinstanceconfig)_ | ShieldedInstanceConfig enables Shielded VM for provisioned nodes: Secure Boot,<br />virtual TPM, and integrity monitoring. |  | Optional: \{\} <br /> |
 | `networkConfig` _[NetworkConfig](#networkconfig)_ | NetworkConfig allows overriding per-interface network settings for provisioned nodes. |  | Optional: \{\} <br /> |
 | `autoGPUTaint` _boolean_ | AutoGPUTaint, when true, automatically applies nvidia.com/gpu=present:NoSchedule<br />to any GPU node at provisioning time, regardless of the NodePool configuration.<br />Disabled by default to preserve backward compatibility. |  | Optional: \{\} <br /> |
 | `gpuDriverVersion` _string_ | GPUDriverVersion controls which NVIDIA driver version GKE installs on GPU nodes.<br />Mirrors the GKE node pool gpu_driver_installation_config.gpu_driver_version field.<br />Valid values: "default" (GKE-recommended stable), "latest" (newest, COS only),<br />"disabled" (skip automatic installation).<br />Ignored for non-GPU instance types. | default | Enum: [default latest disabled] <br />Optional: \{\} <br /> |
@@ -157,7 +157,7 @@ _Appears in:_
 
 
 ImageSelectorTerm defines selection logic for an image used by Karpenter to launch nodes.
-If multiple fields are used for selection, the requirements are ANDed.
+Exactly one of alias, id, or family (with channel or version) must be set.
 
 
 
@@ -166,8 +166,11 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `alias` _string_ | Alias specifies which GKE image to select.<br />Valid families include: ContainerOptimizedOS,Ubuntu |  | MaxLength: 60 <br />Optional: \{\} <br /> |
-| `id` _string_ | ID specifies which GKE image to select. |  | MaxLength: 160 <br />Optional: \{\} <br /> |
+| `alias` _string_ | Deprecated: use Family with Channel or Version instead.<br />Alias specifies which GKE image to select.<br />Valid families include: ContainerOptimizedOS, Ubuntu |  | MaxLength: 60 <br />Optional: \{\} <br /> |
+| `id` _string_ | ID specifies a GKE image by its full resource URL. |  | MaxLength: 160 <br />Optional: \{\} <br /> |
+| `family` _string_ | Family specifies the OS image family. Required when using Channel or Version.<br />Valid values: ContainerOptimizedOS, Ubuntu2404, Ubuntu2204. |  | Enum: [ContainerOptimizedOS Ubuntu2404 Ubuntu2204] <br />Optional: \{\} <br /> |
+| `channel` _string_ | Channel specifies the GKE release channel to follow. Only valid when Family is ContainerOptimizedOS.<br />Use "cluster" to track the channel the cluster is enrolled in. |  | Enum: [rapid regular stable extended cluster] <br />Optional: \{\} <br /> |
+| `version` _string_ | Version pins the image to a specific version or "latest".<br />For ContainerOptimizedOS: "latest" or "milestone.build.build.build" (e.g. "125.19216.104.126").<br />For Ubuntu2404/Ubuntu2204: "latest" or "vYYYYMMDD" (e.g. "v20260416"). |  | MaxLength: 32 <br />Optional: \{\} <br /> |
 
 
 #### KubeletConfiguration

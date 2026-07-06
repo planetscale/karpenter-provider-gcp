@@ -104,6 +104,7 @@ serviceMonitor:
 | controller.featureGates.spotToSpotConsolidation | bool | `true` |  |
 | controller.featureGates.staticCapacity | bool | `false` | staticCapacity is ALPHA and is disabled by default. When enabled, a NodePool with spec.replicas set maintains a fixed number of nodes regardless of pod demand (static node pool). consolidationPolicy and consolidateAfter are ignored on static NodePools. |
 | controller.healthProbe.port | int | `8081` |  |
+| controller.image.digest | string | `""` |  |
 | controller.image.pullPolicy | string | `"IfNotPresent"` |  |
 | controller.image.repository | string | `"public.ecr.aws/cloudpilotai/gcp/karpenter"` |  |
 | controller.image.tag | string | `""` |  |
