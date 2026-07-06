@@ -96,7 +96,10 @@ ut-test: ## Run unit tests
 
 # E2E configuration — names are derived from E2E_PREFIX to stay consistent
 # between the setup script and the test binary.
-# E2E_PROJECT_ID, E2E_SA_PATH, and E2E_LOCATION must be set explicitly — no defaults.
+# E2E_PROJECT_ID and E2E_LOCATION must be set explicitly — no defaults.
+# E2E_SA_PATH is optional: set it to a service-account key, or leave it empty
+# to authenticate with your gcloud session + ADC (`gcloud auth login` &&
+# `gcloud auth application-default login`).
 E2E_PROJECT_ID   ?=
 E2E_SA_PATH      ?=
 E2E_LOCATION     ?=
@@ -125,17 +128,17 @@ e2e-deploy: require-e2e-vars ## Build and deploy karpenter; set RELEASE_VERSION=
 
 require-e2e-vars: ## Fail fast if required e2e variables are not set
 	@test -n "$(E2E_PROJECT_ID)"  || (echo "ERROR: E2E_PROJECT_ID is not set"  >&2 && exit 1)
-	@test -n "$(E2E_SA_PATH)"     || (echo "ERROR: E2E_SA_PATH is not set"     >&2 && exit 1)
 	@test -n "$(E2E_LOCATION)"    || (echo "ERROR: E2E_LOCATION is not set"    >&2 && exit 1)
 
 GINKGO_PROCS ?= 4
-e2e-tests: require-e2e-vars ## Run all e2e test suites in parallel (GINKGO_PROCS=N, default 4)
+GINKGO_ARGS ?=
+e2e-tests: require-e2e-vars ## Run all e2e test suites in parallel (GINKGO_PROCS=N, GINKGO_ARGS="--keep-going")
 	GOOGLE_APPLICATION_CREDENTIALS=$(abspath $(E2E_SA_PATH)) \
 	PROJECT_ID=$(E2E_PROJECT_ID) \
 	CLUSTER_NAME=$(E2E_CLUSTER_NAME) \
 	CLUSTER_LOCATION=$(E2E_LOCATION) \
 	PODS_RANGE_NAME=$(E2E_PODS_RANGE) \
-	go run github.com/onsi/ginkgo/v2/ginkgo --procs=$(GINKGO_PROCS) --timeout=2h -v ./test/suites/...
+	go run github.com/onsi/ginkgo/v2/ginkgo --procs=$(GINKGO_PROCS) --timeout=2h -v $(GINKGO_ARGS) ./test/suites/...
 
 FOCUS ?=
 SUITE ?=
@@ -145,7 +148,7 @@ e2e-test: require-e2e-vars ## Run a single e2e suite or focused spec (SUITE=<nam
 	CLUSTER_NAME=$(E2E_CLUSTER_NAME) \
 	CLUSTER_LOCATION=$(E2E_LOCATION) \
 	PODS_RANGE_NAME=$(E2E_PODS_RANGE) \
-	go run github.com/onsi/ginkgo/v2/ginkgo --procs=$(GINKGO_PROCS) --timeout=30m -v \
+	go run github.com/onsi/ginkgo/v2/ginkgo --procs=$(GINKGO_PROCS) --timeout=30m -v $(GINKGO_ARGS) \
 	$(if $(FOCUS),--focus="$(FOCUS)",) \
 	$(if $(SUITE),./test/suites/$(SUITE)/,./test/suites/...)
 

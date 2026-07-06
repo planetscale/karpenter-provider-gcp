@@ -2,8 +2,11 @@
 # e2e-setup.sh — Idempotently creates GCP infra for e2e tests and deploys
 # the karpenter controller via Helm. Reuses existing resources on re-runs.
 #
-# Required:
-#   GOOGLE_APPLICATION_CREDENTIALS  path to service-account key JSON
+# Authentication (either):
+#   GOOGLE_APPLICATION_CREDENTIALS  path to service-account key JSON, OR
+#   an active gcloud session + ADC (e.g. `gcloud auth login` &&
+#   `gcloud auth application-default login`). When no key is given,
+#   E2E_PROJECT_ID is required.
 #
 # Optional (with defaults):
 #   E2E_PROJECT_ID    GCP project ID        (default: parsed from credentials)
@@ -13,12 +16,14 @@
 #   E2E_MACHINE_TYPE  system node type      (default: n2-standard-2)
 set -euo pipefail
 
-: "${GOOGLE_APPLICATION_CREDENTIALS:?GOOGLE_APPLICATION_CREDENTIALS must be set}"
-
 log() { echo "e2e-setup: $*" >&2; }
 
 # E2E_PROJECT_ID can be set explicitly; if not, extract it from the credentials file.
 if [ -z "${E2E_PROJECT_ID:-}" ]; then
+  if [ -z "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]; then
+    echo "ERROR: set E2E_PROJECT_ID, or GOOGLE_APPLICATION_CREDENTIALS to derive it from." >&2
+    exit 1
+  fi
   E2E_PROJECT_ID="$(python3 -c "import json; print(json.load(open('${GOOGLE_APPLICATION_CREDENTIALS}'))['project_id'])")" \
     || { echo "ERROR: E2E_PROJECT_ID is not set and could not be parsed from ${GOOGLE_APPLICATION_CREDENTIALS}" >&2; exit 1; }
   log "Derived E2E_PROJECT_ID=${E2E_PROJECT_ID} from credentials file"
@@ -49,11 +54,16 @@ SERVICES_CIDR="10.8.0.0/20"
 
 REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 
-log "Authenticating..."
-gcloud auth activate-service-account \
-  --key-file "${GOOGLE_APPLICATION_CREDENTIALS}" \
-  --project "${E2E_PROJECT_ID}" \
-  --quiet
+if [ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]; then
+  log "Authenticating with service-account key..."
+  gcloud auth activate-service-account \
+    --key-file "${GOOGLE_APPLICATION_CREDENTIALS}" \
+    --project "${E2E_PROJECT_ID}" \
+    --quiet
+else
+  log "Using ambient gcloud session ($(gcloud config get-value account 2>/dev/null))..."
+fi
+gcloud config set project "${E2E_PROJECT_ID}" --quiet
 
 # Verify the project exists and is accessible; avoids silent hangs on a wrong ID.
 if ! gcloud projects describe "${E2E_PROJECT_ID}" &>/dev/null; then

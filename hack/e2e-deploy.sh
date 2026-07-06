@@ -8,9 +8,12 @@
 #                            No local build. Used to validate published releases.
 #
 # Required env vars:
-#   GOOGLE_APPLICATION_CREDENTIALS  path to service-account key JSON
 #   E2E_PROJECT_ID                  GCP project ID
 #   E2E_LOCATION                    GCP location (zone or region)
+#
+# Authentication: an active gcloud session is required (set by e2e-setup.sh
+# via a service-account key or `gcloud auth login`). Docker push and the ko
+# build use that session and ADC; no key file is read here directly.
 #
 # Optional env vars:
 #   RELEASE_VERSION   published chart version to install (e.g. 0.3.2)
@@ -18,7 +21,6 @@
 #   E2E_REGION        GCP region (default: us-central1)
 set -euo pipefail
 
-: "${GOOGLE_APPLICATION_CREDENTIALS:?GOOGLE_APPLICATION_CREDENTIALS must be set}"
 : "${E2E_PROJECT_ID:?E2E_PROJECT_ID must be set}"
 : "${E2E_LOCATION:?E2E_LOCATION must be set}"
 

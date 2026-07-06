@@ -3,8 +3,10 @@
 # Order matters: Helm uninstall first, then cluster (so GKE removes its
 # firewall rules/routes), then VPC.
 #
-# Required:
-#   GOOGLE_APPLICATION_CREDENTIALS  path to service-account key JSON
+# Authentication (either):
+#   GOOGLE_APPLICATION_CREDENTIALS  path to service-account key JSON, OR
+#   an active gcloud session (e.g. `gcloud auth login`). When no key is
+#   given, E2E_PROJECT_ID is required.
 #
 # Optional (with defaults matching e2e-setup.sh):
 #   E2E_PROJECT_ID  GCP project ID  (default: parsed from credentials)
@@ -13,12 +15,14 @@
 #   E2E_LOCATION    GCP location (zone or region)
 set -euo pipefail
 
-: "${GOOGLE_APPLICATION_CREDENTIALS:?GOOGLE_APPLICATION_CREDENTIALS must be set}"
-
 log() { echo "e2e-teardown: $*" >&2; }
 
 # E2E_PROJECT_ID can be set explicitly; if not, extract it from the credentials file.
 if [ -z "${E2E_PROJECT_ID:-}" ]; then
+  if [ -z "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]; then
+    echo "ERROR: set E2E_PROJECT_ID, or GOOGLE_APPLICATION_CREDENTIALS to derive it from." >&2
+    exit 1
+  fi
   E2E_PROJECT_ID="$(python3 -c "import json; print(json.load(open('${GOOGLE_APPLICATION_CREDENTIALS}'))['project_id'])")" \
     || { echo "ERROR: E2E_PROJECT_ID is not set and could not be parsed from ${GOOGLE_APPLICATION_CREDENTIALS}" >&2; exit 1; }
   log "Derived E2E_PROJECT_ID=${E2E_PROJECT_ID} from credentials file"
@@ -38,10 +42,13 @@ ROUTER_NAME="${E2E_PREFIX}-router"
 NAT_NAME="${E2E_PREFIX}-nat"
 IAP_FW_NAME="${E2E_PREFIX}-iap-ssh"
 
-gcloud auth activate-service-account \
-  --key-file "${GOOGLE_APPLICATION_CREDENTIALS}" \
-  --project "${E2E_PROJECT_ID}" \
-  --quiet
+if [ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]; then
+  gcloud auth activate-service-account \
+    --key-file "${GOOGLE_APPLICATION_CREDENTIALS}" \
+    --project "${E2E_PROJECT_ID}" \
+    --quiet
+fi
+gcloud config set project "${E2E_PROJECT_ID}" --quiet
 
 # Uninstall karpenter before deleting the cluster so it can clean up GCP instances.
 if gcloud container clusters describe "${CLUSTER_NAME}" \
