@@ -112,10 +112,10 @@ type GCENodeClassSpec struct {
 	// +kubebuilder:default=default
 	// +optional
 	GPUDriverVersion string `json:"gpuDriverVersion,omitempty"`
-	// LocalSsdMode controls how local SSDs are exposed to workloads on machine
-	// types that ship local SSDs (configurable families with a non-zero count
-	// pinned at scheduling time, or bundled-SSD SKUs like -lssd / z3 / a3).
-	// Defaults to RawBlock.
+	// LocalSsdMode controls how a node's local SSDs are exposed to workloads.
+	// RawBlock (the default) leaves them as raw, unformatted NVMe block devices.
+	// Ephemeral formats them, striping multiple SSDs into a single volume, and
+	// mounts them as the node's kubelet ephemeral storage.
 	// +kubebuilder:default=RawBlock
 	// +optional
 	LocalSsdMode LocalSSDMode `json:"localSsdMode,omitempty"`
@@ -126,7 +126,10 @@ type GCENodeClassSpec struct {
 type LocalSSDMode string
 
 const (
-	LocalSSDModeRawBlock  LocalSSDMode = "RawBlock"
+	// RawBlock leaves local SSDs as raw, unformatted NVMe block devices.
+	LocalSSDModeRawBlock LocalSSDMode = "RawBlock"
+	// Ephemeral formats and mounts local SSDs as the node's kubelet ephemeral
+	// storage, striping multiple SSDs into one volume.
 	LocalSSDModeEphemeral LocalSSDMode = "Ephemeral"
 )
 
@@ -350,7 +353,7 @@ type Disk struct {
 }
 
 // DiskCategory represents a disk category type
-// +kubebuilder:validation:Enum=hyperdisk-balanced;hyperdisk-balanced-high-availability;hyperdisk-extreme;hyperdisk-ml;hyperdisk-throughput;local-ssd;pd-balanced;pd-extreme;pd-ssd;pd-standard
+// +kubebuilder:validation:Enum=hyperdisk-balanced;hyperdisk-balanced-high-availability;hyperdisk-extreme;hyperdisk-ml;hyperdisk-throughput;pd-balanced;pd-extreme;pd-ssd;pd-standard
 type DiskCategory string
 
 // SecondaryBootDiskMode is the mode of the secondary boot disk.

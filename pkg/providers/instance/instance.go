@@ -307,8 +307,6 @@ func (p *DefaultProvider) Create(ctx context.Context, nodeClass *v1alpha1.GCENod
 		return nil, fmt.Errorf("no instance types provided")
 	}
 
-	warnLegacyLocalSSDDisks(ctx, nodeClass)
-
 	instanceTypes = orderInstanceTypesByPrice(instanceTypes, scheduling.NewNodeSelectorRequirementsWithMinValues(nodeClaim.Spec.Requirements...))
 	capacityType := p.getCapacityType(nodeClaim, instanceTypes)
 
@@ -378,32 +376,10 @@ func (e *retryableError) Error() string {
 
 func (p *DefaultProvider) tryCreateInstance(ctx context.Context, nodeClass *v1alpha1.GCENodeClass, nodeClaim *karpv1.NodeClaim, instanceType *cloudprovider.InstanceType, capacityType string) (*compute.Instance, string, error) {
 	mt := p.instanceTypeProvider.GetMachineType(instanceType.Name)
-	// evaluateLocalSSDConflict tolerates a nil mt (falls back to the name-suffix
-	// predicate) because a conflict between user config and a name-recognized
-	// bundled family is always a config bug, not a cache state issue.
-	if err := evaluateLocalSSDConflict(nodeClass, instanceType.Name, mt); err != nil {
-		log.FromContext(ctx).Error(err, "local-SSD conflict; skipping candidate", "instanceType", instanceType.Name)
-		return nil, "", &retryableError{err}
-	}
 
-	// resolveLocalSSDCount returns one of:
-	//   - a *cloudprovider.CreateError (fatal: unsupported operator or
-	//     multi-valued In on the count requirement) — surface as-is so the
-	//     NodeClaim records Launched=False with a meaningful reason;
-	//   - a plain error (retryable: cache miss on a bundled-name SKU; we
-	//     can't pick an authoritative count, so fall through to the next
-	//     candidate instead of booting a node whose SSDs would never be
-	//     formatted by the GKE bootstrapper);
-	reqs := scheduling.NewNodeSelectorRequirementsWithMinValues(nodeClaim.Spec.Requirements...)
-	ssdCount, err := resolveLocalSSDCount(reqs, nodeClass, instanceType.Name, mt)
+	ssdCount, err := resolveCreateSSDCount(instanceType)
 	if err != nil {
-		var createErr *cloudprovider.CreateError
-		if errors.As(err, &createErr) {
-			log.FromContext(ctx).Error(err, "resolveLocalSSDCount failed; surfacing as CreateError", "instanceType", instanceType.Name, "reason", createErr.ConditionReason)
-			return nil, "", err
-		}
-		log.FromContext(ctx).Error(err, "resolveLocalSSDCount failed; treating as retryable", "instanceType", instanceType.Name)
-		return nil, "", &retryableError{err}
+		return nil, "", err
 	}
 
 	zone, err := p.selectZone(ctx, nodeClaim, instanceType, capacityType)
@@ -536,16 +512,31 @@ func orderInstanceTypesByPrice(instanceTypes []*cloudprovider.InstanceType, requ
 	return instanceTypes
 }
 
-// variantSSDCount returns the local-SSD count pinned on its
-// karpenter.k8s.gcp/instance-local-ssd-count requirement. Returns 0 when the
-// requirement is absent or has a non-integer value (shouldn't happen — every
-// variant in instancetype.List sets it via localSSDCountRequirement).
-func variantSSDCount(it *cloudprovider.InstanceType) int {
+// resolveCreateSSDCount returns the concrete local-SSD count to attach for the
+// selected variant. Every variant emitted by instancetype.List pins exactly one
+// integer count on its instance-local-ssd-count requirement; a variant whose
+// count is not a single non-negative integer fails loudly rather than silently
+// attaching zero. The NodeClaim's count requirement (which may be a multi-valued
+// allowed set) is intentionally not consulted: it constrains which variants are
+// candidates, not the physical attach count.
+func resolveCreateSSDCount(it *cloudprovider.InstanceType) (int, error) {
 	req := it.Requirements.Get(v1alpha1.LabelInstanceLocalSsdCount)
-	if len(req.Values()) == 0 {
-		return 0
+	if req.Operator() != corev1.NodeSelectorOpIn || req.Len() != 1 {
+		return 0, fmt.Errorf("instance type %s has no single-valued %s requirement; every variant must pin exactly one count",
+			it.Name, v1alpha1.LabelInstanceLocalSsdCount)
 	}
-	n, err := strconv.Atoi(req.Values()[0])
+	n, err := strconv.Atoi(req.Any())
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("instance type %s %s value %q is not a non-negative integer; every variant must pin an integer count",
+			it.Name, v1alpha1.LabelInstanceLocalSsdCount, req.Any())
+	}
+	return n, nil
+}
+
+// variantSSDCount returns the variant's pinned local-SSD count for the price
+// sort's tie-break, or 0 if it can't be resolved.
+func variantSSDCount(it *cloudprovider.InstanceType) int {
+	n, err := resolveCreateSSDCount(it)
 	if err != nil {
 		return 0
 	}
@@ -640,16 +631,12 @@ func (p *DefaultProvider) selectZone(ctx context.Context, nodeClaim *karpv1.Node
 	return cheapestCompatibleZone(zones, reqs, instanceType.Offerings), nil
 }
 
-// renderDiskProperties builds the AttachedDisks list for the new instance.
-// ssdCount is the resolved local-SSD partition count (from resolveLocalSSDCount
-// — either the bundled count, the NodeClaim's count requirement, or 0); the
-// renderer attaches exactly that many SCRATCH disks.
-//
-// Legacy disks[].category=local-ssd entries are skipped here: the count is
-// authoritative from the scheduler / requirement path, and emitting one
-// SCRATCH per entry on top of ssdCount would double-attach.
+// renderDiskProperties emits ssdCount explicit SCRATCH disks only for
+// configurable-SSD families; bundled-SSD families get theirs from the machine
+// shape. A residual disks[].category=local-ssd entry on a pre-migration
+// NodeClass is skipped so it never renders as a (GCE-rejected) persistent disk.
 func (p *DefaultProvider) renderDiskProperties(instanceType *cloudprovider.InstanceType,
-	nodeClass *v1alpha1.GCENodeClass, zone string, ssdCount int, mt *computepb.MachineType,
+	nodeClass *v1alpha1.GCENodeClass, zone string, ssdCount int,
 ) ([]*compute.AttachedDisk, error) {
 	disks := nodeClass.Spec.Disks
 	sort.Slice(disks, func(i, j int) bool {
@@ -708,11 +695,11 @@ func (p *DefaultProvider) renderDiskProperties(instanceType *cloudprovider.Insta
 		attachedDisks = append(attachedDisks, attachedDisk)
 	}
 
-	// Bundled-SSD families (C3/C4*/Z3/A3/A4*) auto-attach their local SSDs by
-	// machine shape. An explicit SCRATCH disk is redundant for the C-series and
-	// rejected outright for Z3 Titanium ("configuration_availability"), so emit
-	// scratch disks only for configurable families that require explicit attach.
-	if !hasBundledLocalSSDs(instanceType.Name, mt) {
+	// Only 1st/2nd-gen configurable families require an explicit SCRATCH attach.
+	// Fixed-count local-SSD SKUs auto-attach by machine shape; an explicit disk is
+	// redundant for the C-series and rejected outright for Z3 Titanium
+	// ("configuration_availability").
+	if localssd.FamilySupportsConfigurableLocalSSDs(instanceType.Name) {
 		for i := 0; i < ssdCount; i++ {
 			attachedDisks = append(attachedDisks, p.scratchDisk(zone))
 		}
@@ -737,7 +724,7 @@ func (p *DefaultProvider) scratchDisk(zone string) *compute.AttachedDisk {
 }
 
 func (p *DefaultProvider) buildInstance(ctx context.Context, nodeClaim *karpv1.NodeClaim, nodeClass *v1alpha1.GCENodeClass, instanceType *cloudprovider.InstanceType, sourceMetadata *compute.Metadata, clusterConfig *container.Cluster, zone, instanceName, capacityType string, mt *computepb.MachineType, ssdCount int) (*compute.Instance, error) {
-	attachedDisks, err := p.renderDiskProperties(instanceType, nodeClass, zone, ssdCount, mt)
+	attachedDisks, err := p.renderDiskProperties(instanceType, nodeClass, zone, ssdCount)
 	if err != nil {
 		return nil, fmt.Errorf("rendering disk properties: %w", err)
 	}
@@ -799,7 +786,7 @@ func (p *DefaultProvider) buildInstance(ctx context.Context, nodeClaim *karpv1.N
 	p.configureConfidentialInstance(instance, nodeClass)
 
 	// Setup karpenter built-in labels
-	p.setupInstanceLabels(instance, nodeClaim, nodeClass, clusterConfig.Id)
+	p.setupInstanceLabels(instance, nodeClaim, nodeClass, clusterConfig.Id, ssdCount)
 
 	return instance, nil
 }
@@ -901,9 +888,8 @@ func podCIDRRange(maxPods int32) int32 {
 }
 
 // setupInstanceMetadata configures all metadata-related settings for the instance.
-// ssdCount is the pre-resolved local-SSD count from resolveLocalSSDCount; the
-// caller threads it down so we don't re-fetch the MachineType here (the second
-// cache lookup would race against UpdateInstanceTypes between the call sites).
+// ssdCount is the selected variant's pinned local-SSD count (from
+// resolveCreateSSDCount), threaded down by the caller.
 func (p *DefaultProvider) setupInstanceMetadata(ctx context.Context, sourceMetadata *compute.Metadata, nodeClass *v1alpha1.GCENodeClass, instanceType *cloudprovider.InstanceType, nodeClaim *karpv1.NodeClaim, zone string, capacityType string, isGPUInstance bool, ssdCount int) (*metadata.InstanceMetadata, error) {
 	target, err := metadata.FromSourceTemplate(sourceMetadata)
 	if err != nil {
@@ -977,12 +963,13 @@ func (p *DefaultProvider) buildTargetMetadata(ctx context.Context, target *metad
 	}
 }
 
-// Local-SSD kube-env and node-label keys read by the GKE bootstrapper.
+// Local-SSD kube-env and node-label keys read by the GKE bootstrapper. The
+// legacy NODE_LOCAL_SSDS_EXT key GKE leaves empty is intentionally not managed.
 const (
-	kubeEnvKeyLocalSSDsExt       = "NODE_LOCAL_SSDS_EXT"
-	kubeEnvKeyLocalSSDsEphemeral = "NODE_LOCAL_SSDS_EPHEMERAL"
-	kubeLabelKeyLocalNVMe        = "cloud.google.com/gke-local-nvme-ssd"
-	kubeLabelKeyEphemeralLS      = "cloud.google.com/gke-ephemeral-storage-local-ssd"
+	kubeEnvKeyLocalNVMeBlockExt        = "NODE_LOCAL_NVME_SSD_BLOCK_EXT"
+	kubeEnvKeyEphemeralStorageLocalSSD = "NODE_EPHEMERAL_STORAGE_LOCAL_SSD"
+	kubeLabelKeyLocalNVMe              = "cloud.google.com/gke-local-nvme-ssd"
+	kubeLabelKeyEphemeralLS            = "cloud.google.com/gke-ephemeral-storage-local-ssd"
 )
 
 // patchLocalSSDMetadata sets the kube-env and node-label entries that tell the
@@ -995,145 +982,20 @@ func patchLocalSSDMetadata(target *metadata.InstanceMetadata, nodeClass *v1alpha
 	var envKey, envValue, envDrop, labelKey string
 	switch nodeClass.Spec.LocalSsdMode {
 	case v1alpha1.LocalSSDModeEphemeral:
-		envKey, envValue = kubeEnvKeyLocalSSDsEphemeral, "true"
-		envDrop = kubeEnvKeyLocalSSDsExt
+		envKey, envValue = kubeEnvKeyEphemeralStorageLocalSSD, "true"
+		envDrop = kubeEnvKeyLocalNVMeBlockExt
 		labelKey = kubeLabelKeyEphemeralLS
 	default:
 		// RawBlock is the default; treat empty string as RawBlock so a
 		// NodeClass that omits the field still gets sensible kube-env.
-		envKey, envValue = kubeEnvKeyLocalSSDsExt, fmt.Sprintf("%d,nvme,block", ssdCount)
-		envDrop = kubeEnvKeyLocalSSDsEphemeral
+		envKey, envValue = kubeEnvKeyLocalNVMeBlockExt, fmt.Sprintf("%d,nvme,block", ssdCount)
+		envDrop = kubeEnvKeyEphemeralStorageLocalSSD
 		labelKey = kubeLabelKeyLocalNVMe
 	}
 	target.UnsetKubeEnvEntry(envDrop)
 	target.SetKubeEnvEntry(envKey, envValue)
 	target.SetKubeLabel(labelKey, "true")
 	target.SetRegistrationNodeLabel(labelKey, "true")
-}
-
-// CreateError reasons emitted by resolveLocalSSDCount. Surface as
-// NodeClaim.Status.Conditions[Launched].Reason via *cloudprovider.CreateError.
-const (
-	reasonUnsupportedLocalSSDCountOperator = "UnsupportedLocalSSDCountOperator"
-	reasonMultiValuedLocalSSDCount         = "MultiValuedLocalSSDCount"
-	reasonInvalidLocalSSDCountValue        = "InvalidLocalSSDCountValue"
-)
-
-// resolveLocalSSDCount returns the effective local-SSD count to advertise to
-// the GKE bootstrapper via kube-env. Precedence:
-//
-//  1. machineType.BundledLocalSsds.PartitionCount — bundled SKUs (z3, c4d-lssd,
-//     c4-lssd, c4a-lssd, etc.). Bundled count is authoritative; intersection
-//     narrowing on the InstanceType requirement should have either matched any
-//     NodeClaim count requirement or filtered the SKU out, so we don't
-//     reconcile against the requirement here.
-//  2. NodeClaim count requirement (key v1alpha1.LabelInstanceLocalSsdCount).
-//     Operator != In returns a *cloudprovider.CreateError (deliberate scope
-//     cut — supporting Gt/Lt/NotIn requires per-machine-type allowed-count
-//     metadata we don't keep). In with len > 1 is also a CreateError; the
-//     resolver picks one physical count and can't represent "either N or M."
-//  3. Legacy disks[].category=local-ssd entries — kept as a transitional
-//     fallback until disks[] is fully retired.
-//
-// Returns a plain (retryable) error when the name suffix says the SKU bundles
-// local SSDs but mt is nil (cache miss). The caller wraps that in
-// &retryableError{} so the Create loop falls through to the next candidate
-// rather than booting a node whose physical SSDs would never be formatted.
-func resolveLocalSSDCount(
-	reqs scheduling.Requirements,
-	nodeClass *v1alpha1.GCENodeClass,
-	instanceTypeName string,
-	mt *computepb.MachineType,
-) (int, error) {
-	if mt != nil {
-		if bls := mt.GetBundledLocalSsds(); bls != nil && bls.PartitionCount != nil && *bls.PartitionCount > 0 {
-			return int(*bls.PartitionCount), nil
-		}
-	} else if hasBundledLocalSSDs(instanceTypeName, nil) {
-		return 0, fmt.Errorf("machine type %s bundles local SSDs but is not in the instance-type cache; refusing to create without an authoritative SSD count", instanceTypeName)
-	}
-
-	// scheduling.Requirements.Get synthesizes a NodeSelectorOpExists requirement
-	// for an absent key, so we must check Has first; an absent count requirement
-	// is not an error, it falls through to legacy disks[] / zero.
-	if reqs.Has(v1alpha1.LabelInstanceLocalSsdCount) {
-		count, ok, err := countFromSSDRequirement(reqs.Get(v1alpha1.LabelInstanceLocalSsdCount))
-		if err != nil {
-			return 0, err
-		}
-		if ok {
-			return count, nil
-		}
-	}
-
-	legacy := 0
-	for _, d := range nodeClass.Spec.Disks {
-		if d.Category == "local-ssd" {
-			legacy++
-		}
-	}
-	return legacy, nil
-}
-
-// countFromSSDRequirement parses a karpenter.k8s.gcp/instance-local-ssd-count
-// requirement. Returns (count, true, nil) on a single valid In value;
-// (0, false, nil) when the requirement is effectively absent (DoesNotExist or
-// In:[]) so the caller falls through to legacy disks[]; and a
-// *cloudprovider.CreateError when the operator is unsupported, the value list
-// has more than one entry, or the single value isn't a non-negative integer.
-func countFromSSDRequirement(req *scheduling.Requirement) (int, bool, error) {
-	op := req.Operator()
-	if op == corev1.NodeSelectorOpDoesNotExist {
-		return 0, false, nil
-	}
-	if op != corev1.NodeSelectorOpIn {
-		return 0, false, cloudprovider.NewCreateError(
-			fmt.Errorf("%s requirement uses operator %s; only In is supported", v1alpha1.LabelInstanceLocalSsdCount, op),
-			reasonUnsupportedLocalSSDCountOperator,
-			fmt.Sprintf("requirement %s uses operator %s; only In is supported", v1alpha1.LabelInstanceLocalSsdCount, op),
-		)
-	}
-	values := req.Values()
-	switch len(values) {
-	case 0:
-		return 0, false, nil
-	case 1:
-		n, err := strconv.Atoi(values[0])
-		if err != nil || n < 0 {
-			return 0, false, cloudprovider.NewCreateError(
-				fmt.Errorf("%s requirement value %q is not a non-negative integer", v1alpha1.LabelInstanceLocalSsdCount, values[0]),
-				reasonInvalidLocalSSDCountValue,
-				fmt.Sprintf("requirement %s value %q is not a non-negative integer", v1alpha1.LabelInstanceLocalSsdCount, values[0]),
-			)
-		}
-		return n, true, nil
-	default:
-		return 0, false, cloudprovider.NewCreateError(
-			fmt.Errorf("%s requirement resolved to %d values (%v); resolver requires a single In value", v1alpha1.LabelInstanceLocalSsdCount, len(values), values),
-			reasonMultiValuedLocalSSDCount,
-			fmt.Sprintf("requirement %s resolved to %d values; expected exactly one", v1alpha1.LabelInstanceLocalSsdCount, len(values)),
-		)
-	}
-}
-
-// warnLegacyLocalSSDDisks logs a deprecation warning for each
-// `spec.disks[].category == "local-ssd"` entry on the NodeClass. Emitted per
-// provisioning attempt (not once at apply time) so the warning lands next to
-// the provisioning log line in the controller output.
-func warnLegacyLocalSSDDisks(ctx context.Context, nodeClass *v1alpha1.GCENodeClass) {
-	for i, d := range nodeClass.Spec.Disks {
-		if d.Category != "local-ssd" {
-			continue
-		}
-		fields := []any{"nodeClass", nodeClass.Name, "diskIndex", i}
-		if d.SizeGiB > 0 {
-			fields = append(fields, "sizeGiB", d.SizeGiB, "sizeGiBIgnored", true)
-		}
-		log.FromContext(ctx).Info(
-			"spec.disks[].category=local-ssd is deprecated; pin the count on the pod or NodePool via the karpenter.k8s.gcp/instance-local-ssd-count label instead",
-			fields...,
-		)
-	}
 }
 
 // instanceTypeHasGPU reports whether the instance type has a built-in GPU requirement.
@@ -1414,7 +1276,7 @@ func (p *DefaultProvider) configureConfidentialInstance(instance *compute.Instan
 // setupInstanceLabels writes controller-owned GCE labels for a new instance.
 // Kubernetes node labels are rebuilt separately in bootstrap metadata and must
 // not be copied to GCE instance labels.
-func (p *DefaultProvider) setupInstanceLabels(instance *compute.Instance, nodeClaim *karpv1.NodeClaim, nodeClass *v1alpha1.GCENodeClass, clusterID string) {
+func (p *DefaultProvider) setupInstanceLabels(instance *compute.Instance, nodeClaim *karpv1.NodeClaim, nodeClass *v1alpha1.GCENodeClass, clusterID string, ssdCount int) {
 	if id, ok := clusterIDBase32(clusterID); ok {
 		instance.Labels["goog-gke-cluster-id-base32"] = id
 	}
@@ -1429,6 +1291,9 @@ func (p *DefaultProvider) setupInstanceLabels(instance *compute.Instance, nodeCl
 	// is checked by belongsToCluster to distinguish same-named clusters in different locations.
 	instance.Labels[utils.SanitizeGCELabelValue(utils.LabelClusterNameKey)] = p.clusterName
 	instance.Labels[utils.SanitizeGCELabelValue(utils.LabelClusterLocationKey)] = p.clusterLocation
+	// The launched variant's local-SSD count. matchVariantForInstance reads this
+	// to map the VM back to the same-Name variant it was created from.
+	instance.Labels[utils.SanitizeGCELabelValue(v1alpha1.LabelInstanceLocalSsdCount)] = strconv.Itoa(ssdCount)
 }
 
 func clusterIDBase32(clusterID string) (string, bool) {

@@ -98,9 +98,8 @@ func TestFamilySupportsConfigurableLocalSSDs(t *testing.T) {
 }
 
 // TestAllowedLocalSSDCounts pins the per-family-per-vCPU allowed-count table
-// used to drive per-count InstanceType variant emission. Source data verified
-// 2026-05 against GCE general-purpose-machines and compute-optimized-machines
-// docs.
+// used to drive per-count InstanceType variant emission. Source data is GCE's
+// general-purpose-machines and compute-optimized-machines docs.
 func TestAllowedLocalSSDCounts(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -124,11 +123,11 @@ func TestAllowedLocalSSDCounts(t *testing.T) {
 		{"n2-standard-128", "n2-standard-128", 128, []int{16, 24}},
 
 		// N2 bracket-interior vCPU values (no predefined SKUs at these counts,
-		// but the doc rule covers them — verifies we match the published
+		// but the doc rule covers them, verifying we match the published
 		// bracket boundaries, not just the predefined SKU vCPUs).
 		{"n2 hypothetical 10-vCPU (top of lowest bracket)", "n2-foo-10", 10, []int{1, 2, 4, 8, 16, 24}},
-		{"n2 hypothetical 22-vCPU (start of 22–40 bracket)", "n2-foo-22", 22, []int{4, 8, 16, 24}},
-		{"n2 hypothetical 42-vCPU (start of 42–80 bracket)", "n2-foo-42", 42, []int{8, 16, 24}},
+		{"n2 hypothetical 22-vCPU (start of 22-40 bracket)", "n2-foo-22", 22, []int{4, 8, 16, 24}},
+		{"n2 hypothetical 42-vCPU (start of 42-80 bracket)", "n2-foo-42", 42, []int{8, 16, 24}},
 		{"n2 hypothetical 82-vCPU (start of top bracket)", "n2-foo-82", 82, []int{16, 24}},
 
 		// n2d brackets differ from n2 at 16 vCPUs (n2d still allows min=1).

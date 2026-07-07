@@ -105,9 +105,11 @@ func (c *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim)
 		return nil, fmt.Errorf("creating instance, %w", err)
 	}
 
-	instanceType, _ := lo.Find(instanceTypes, func(i *cloudprovider.InstanceType) bool {
-		return i.Name == instance.Type
-	})
+	// instance.Type is only the machine type name; for configurable-SSD families
+	// several variants share it. Match by name + the stamped local-SSD count label
+	// so the returned NodeClaim's capacity and labels reflect the variant we
+	// actually launched (Ephemeral ephemeral-storage capacity differs per count).
+	instanceType, _ := matchVariantForInstance(instanceTypes, instance)
 
 	nc := c.instanceToNodeClaim(instance, instanceType)
 	nc.Annotations = lo.Assign(nc.Annotations, map[string]string{
@@ -174,13 +176,17 @@ func (c *CloudProvider) resolveInstanceTypeFromInstance(ctx context.Context, ins
 // This function reads that label and picks the variant whose requirement
 // matches.
 //
-// Falls back to the first Name-match in two cases:
-//   - the VM has no SSD-count label: provisioned before this provider
-//     started stamping it, or adopted from outside Karpenter.
+// Falls back to the first Name-match (the count=0 variant, since
+// instancetype.List sorts variants ascending by count) in two cases:
+//   - the VM has no SSD-count label: provisioned before this provider started
+//     stamping it, or adopted from outside Karpenter.
 //   - the label value matches no current variant: e.g. an SSD count that
 //     AllowedLocalSSDCounts no longer lists.
 //
-// Both keep reconciliation moving rather than stalling on one bad VM.
+// Both keep reconciliation moving rather than stalling on one bad VM. The
+// count=0 fallback under-reports ephemeral-storage in Ephemeral mode, but is
+// kept deliberately simple: this provider has no pre-existing local-SSD nodes
+// (it never booted them before), so only externally adopted nodes hit it.
 func matchVariantForInstance(its []*cloudprovider.InstanceType, inst *instance.Instance) (*cloudprovider.InstanceType, bool) {
 	gceCountKey := utils.SanitizeGCELabelValue(v1alpha1.LabelInstanceLocalSsdCount)
 	wantCount, hasCount := inst.Labels[gceCountKey]

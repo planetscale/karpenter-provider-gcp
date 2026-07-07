@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -656,7 +657,7 @@ func TestRenderDiskProperties_NoProvisioningWhenFieldsAreNil(t *testing.T) {
 	p := &DefaultProvider{projectID: "my-project"}
 	nodeClass := bootDiskNodeClass("pd-ssd", nil, nil)
 
-	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a", 0, nil)
+	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a", 0)
 	require.NoError(t, err)
 
 	require.Len(t, disks, 1)
@@ -670,7 +671,7 @@ func TestRenderDiskProperties_SetsProvisionedIOPS(t *testing.T) {
 	p := &DefaultProvider{projectID: "my-project"}
 	nodeClass := bootDiskNodeClass("pd-extreme", ptr.To(int64(5000)), nil)
 
-	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a", 0, nil)
+	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a", 0)
 	require.NoError(t, err)
 
 	require.Len(t, disks, 1)
@@ -684,7 +685,7 @@ func TestRenderDiskProperties_SetsProvisionedThroughput(t *testing.T) {
 	p := &DefaultProvider{projectID: "my-project"}
 	nodeClass := bootDiskNodeClass("hyperdisk-throughput", nil, ptr.To(int64(500)))
 
-	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a", 0, nil)
+	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a", 0)
 	require.NoError(t, err)
 
 	require.Len(t, disks, 1)
@@ -698,7 +699,7 @@ func TestRenderDiskProperties_SetsBothIOPSAndThroughput(t *testing.T) {
 	p := &DefaultProvider{projectID: "my-project"}
 	nodeClass := bootDiskNodeClass("hyperdisk-balanced", ptr.To(int64(10000)), ptr.To(int64(400)))
 
-	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a", 0, nil)
+	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a", 0)
 	require.NoError(t, err)
 
 	require.Len(t, disks, 1)
@@ -721,23 +722,25 @@ func countScratch(disks []*compute.AttachedDisk) int {
 }
 
 // TestRenderDiskProperties_SsdCountEmitsScratchDisks pins the SCRATCH-disk
-// count to the resolved ssdCount parameter (which tryCreateInstance derives
-// from the NodeClaim's count requirement / BundledLocalSsds). Legacy
-// disks[].category=local-ssd entries on the NodeClass do not contribute to
-// the SCRATCH count — they are skipped here so we don't double-attach.
+// count to the ssdCount parameter, gated on the machine family: only
+// configurable (1st/2nd-gen) families get explicit SCRATCH attach; bundled-SSD
+// SKUs get theirs from the machine shape. Residual disks[].category=local-ssd
+// entries on a pre-migration NodeClass never contribute.
 func TestRenderDiskProperties_SsdCountEmitsScratchDisks(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
 		name             string
+		instanceTypeName string
 		ssdCount         int
 		legacyEntries    int
 		wantScratchCount int
 	}{
-		{name: "no SSDs at all", ssdCount: 0, legacyEntries: 0, wantScratchCount: 0},
-		{name: "ssdCount=2, no legacy entries", ssdCount: 2, legacyEntries: 0, wantScratchCount: 2},
-		{name: "ssdCount=0 with 2 legacy entries → still 0 (legacy ignored)", ssdCount: 0, legacyEntries: 2, wantScratchCount: 0},
-		{name: "ssdCount=3 with 1 legacy entry → 3 (legacy ignored)", ssdCount: 3, legacyEntries: 1, wantScratchCount: 3},
+		{name: "no SSDs at all", instanceTypeName: "n2d-standard-8", ssdCount: 0, legacyEntries: 0, wantScratchCount: 0},
+		{name: "configurable family ssdCount=2", instanceTypeName: "n2d-standard-8", ssdCount: 2, legacyEntries: 0, wantScratchCount: 2},
+		{name: "ssdCount=0 with 2 legacy entries → still 0 (legacy ignored)", instanceTypeName: "n2d-standard-8", ssdCount: 0, legacyEntries: 2, wantScratchCount: 0},
+		{name: "ssdCount=3 with 1 legacy entry → 3 (legacy ignored)", instanceTypeName: "n2d-standard-8", ssdCount: 3, legacyEntries: 1, wantScratchCount: 3},
+		{name: "bundled SKU never gets explicit SCRATCH", instanceTypeName: "z3-highmem-88-highlssd", ssdCount: 12, legacyEntries: 0, wantScratchCount: 0},
 	}
 
 	for _, tc := range cases {
@@ -762,8 +765,10 @@ func TestRenderDiskProperties_SsdCountEmitsScratchDisks(t *testing.T) {
 				nc.Spec.Disks = append(nc.Spec.Disks, v1alpha1.Disk{Category: "local-ssd"})
 			}
 
+			it := amd64InstanceType()
+			it.Name = tc.instanceTypeName
 			p := &DefaultProvider{projectID: "my-project"}
-			disks, err := p.renderDiskProperties(amd64InstanceType(), nc, "us-central1-a", tc.ssdCount, nil)
+			disks, err := p.renderDiskProperties(it, nc, "us-central1-a", tc.ssdCount)
 			require.NoError(t, err)
 			require.Equal(t, tc.wantScratchCount, countScratch(disks),
 				"expected %d SCRATCH local-SSD disks", tc.wantScratchCount)
@@ -807,7 +812,7 @@ func TestRenderDiskProperties_MultipleDisksSetProvisioningIndependently(t *testi
 		},
 	}
 
-	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a", 0, nil)
+	disks, err := p.renderDiskProperties(amd64InstanceType(), nodeClass, "us-central1-a", 0)
 	require.NoError(t, err)
 
 	require.Len(t, disks, 2)
@@ -1697,11 +1702,30 @@ func TestSetupInstanceLabels_StampsClusterLocation(t *testing.T) {
 	p := &DefaultProvider{clusterName: "my-cluster", clusterLocation: "us-central1-f"}
 	inst, nodeClaim, nodeClass := instanceLabelsFixture()
 
-	p.setupInstanceLabels(inst, nodeClaim, nodeClass, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	p.setupInstanceLabels(inst, nodeClaim, nodeClass, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", 0)
 
 	locationKey := utils.SanitizeGCELabelValue(utils.LabelClusterLocationKey)
 	require.Equal(t, "us-central1-f", inst.Labels[locationKey],
 		"cluster location must be stamped on the instance label %q", locationKey)
+}
+
+// TestSetupInstanceLabels_StampsLocalSSDCount pins the variant-disambiguation
+// contract: matchVariantForInstance reads this GCE label to map a live VM back
+// to the same-Name variant it was launched from, so Create must stamp it for
+// every node, including count 0.
+func TestSetupInstanceLabels_StampsLocalSSDCount(t *testing.T) {
+	t.Parallel()
+
+	countKey := utils.SanitizeGCELabelValue(v1alpha1.LabelInstanceLocalSsdCount)
+	for _, count := range []int{0, 4} {
+		p := &DefaultProvider{clusterName: "my-cluster", clusterLocation: "us-central1-f"}
+		inst, nodeClaim, nodeClass := instanceLabelsFixture()
+
+		p.setupInstanceLabels(inst, nodeClaim, nodeClass, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", count)
+
+		require.Equal(t, strconv.Itoa(count), inst.Labels[countKey],
+			"local-SSD count %d must be stamped on the instance label %q", count, countKey)
+	}
 }
 
 func TestBuildInstance_DoesNotCopyKubernetesSchedulingLabelsToGCELabels(t *testing.T) {
@@ -1747,7 +1771,7 @@ func TestSetupInstanceLabels_ClusterNameNotOverwrittenByRequirements(t *testing.
 
 	p := &DefaultProvider{clusterName: "real-cluster", clusterLocation: "us-central1-f"}
 	inst, nodeClaim, nodeClass := instanceLabelsFixture()
-	p.setupInstanceLabels(inst, nodeClaim, nodeClass, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	p.setupInstanceLabels(inst, nodeClaim, nodeClass, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", 0)
 
 	nameKey := utils.SanitizeGCELabelValue(utils.LabelClusterNameKey)
 	require.Equal(t, "real-cluster", inst.Labels[nameKey],
@@ -1759,7 +1783,7 @@ func TestSetupInstanceLabels_ClusterLocationNotOverwrittenByRequirements(t *test
 
 	p := &DefaultProvider{clusterName: "my-cluster", clusterLocation: "us-central1-f"}
 	inst, nodeClaim, nodeClass := instanceLabelsFixture()
-	p.setupInstanceLabels(inst, nodeClaim, nodeClass, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	p.setupInstanceLabels(inst, nodeClaim, nodeClass, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", 0)
 
 	locationKey := utils.SanitizeGCELabelValue(utils.LabelClusterLocationKey)
 	require.Equal(t, "us-central1-f", inst.Labels[locationKey],
@@ -1982,6 +2006,20 @@ func TestSetupServiceAccounts_ErrorWhenNoSAAvailable(t *testing.T) {
 	_, err := p.setupServiceAccounts(nodeClass)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no service account available")
+}
+
+// machineTypeWithBundledSSDs returns a *computepb.MachineType reporting `count`
+// bundled local SSDs. count == 0 returns nil BundledLocalSsds, which is how the
+// GCE API represents a non-bundled SKU.
+func machineTypeWithBundledSSDs(count int32) *computepb.MachineType {
+	if count == 0 {
+		return &computepb.MachineType{}
+	}
+	return &computepb.MachineType{
+		BundledLocalSsds: &computepb.BundledLocalSsds{
+			PartitionCount: ptr.To(count),
+		},
+	}
 }
 
 func TestOnHostMaintenancePolicy(t *testing.T) {
@@ -2313,7 +2351,7 @@ func TestConfidentialInstanceType(t *testing.T) {
 
 // TestPatchLocalSSDMetadata verifies the kube-env / node-label contract the
 // GKE bootstrapper depends on: RawBlock advertises "<count>,nvme,block" via
-// NODE_LOCAL_SSDS_EXT, Ephemeral advertises NODE_LOCAL_SSDS_EPHEMERAL=true,
+// NODE_LOCAL_NVME_SSD_BLOCK_EXT, Ephemeral advertises NODE_EPHEMERAL_STORAGE_LOCAL_SSD=true,
 // each mode drops the other mode's key inherited from the source template,
 // and count 0 leaves the metadata untouched.
 func TestPatchLocalSSDMetadata(t *testing.T) {
@@ -2333,8 +2371,8 @@ func TestPatchLocalSSDMetadata(t *testing.T) {
 			name:          "RawBlock count 4",
 			mode:          v1alpha1.LocalSSDModeRawBlock,
 			count:         4,
-			wantEnv:       []string{"NODE_LOCAL_SSDS_EXT: 4,nvme,block"},
-			wantNotEnv:    []string{"NODE_LOCAL_SSDS_EPHEMERAL"},
+			wantEnv:       []string{"NODE_LOCAL_NVME_SSD_BLOCK_EXT: 4,nvme,block"},
+			wantNotEnv:    []string{"NODE_EPHEMERAL_STORAGE_LOCAL_SSD"},
 			wantLabels:    []string{"cloud.google.com/gke-local-nvme-ssd=true"},
 			wantNotLabels: []string{"cloud.google.com/gke-ephemeral-storage-local-ssd"},
 		},
@@ -2342,7 +2380,7 @@ func TestPatchLocalSSDMetadata(t *testing.T) {
 			name:          "empty mode defaults to RawBlock",
 			mode:          "",
 			count:         2,
-			wantEnv:       []string{"NODE_LOCAL_SSDS_EXT: 2,nvme,block"},
+			wantEnv:       []string{"NODE_LOCAL_NVME_SSD_BLOCK_EXT: 2,nvme,block"},
 			wantLabels:    []string{"cloud.google.com/gke-local-nvme-ssd=true"},
 			wantNotLabels: []string{"cloud.google.com/gke-ephemeral-storage-local-ssd"},
 		},
@@ -2350,9 +2388,9 @@ func TestPatchLocalSSDMetadata(t *testing.T) {
 			name:          "Ephemeral drops inherited EXT key",
 			mode:          v1alpha1.LocalSSDModeEphemeral,
 			count:         2,
-			sourceKubeEnv: "NODE_LOCAL_SSDS_EXT: 8,nvme,block\n",
-			wantEnv:       []string{"NODE_LOCAL_SSDS_EPHEMERAL: true"},
-			wantNotEnv:    []string{"NODE_LOCAL_SSDS_EXT"},
+			sourceKubeEnv: "NODE_LOCAL_NVME_SSD_BLOCK_EXT: 8,nvme,block\n",
+			wantEnv:       []string{"NODE_EPHEMERAL_STORAGE_LOCAL_SSD: true"},
+			wantNotEnv:    []string{"NODE_LOCAL_NVME_SSD_BLOCK_EXT"},
 			wantLabels:    []string{"cloud.google.com/gke-ephemeral-storage-local-ssd=true"},
 			wantNotLabels: []string{"cloud.google.com/gke-local-nvme-ssd"},
 		},
@@ -2360,7 +2398,7 @@ func TestPatchLocalSSDMetadata(t *testing.T) {
 			name:          "count 0 is a no-op",
 			mode:          v1alpha1.LocalSSDModeRawBlock,
 			count:         0,
-			wantNotEnv:    []string{"NODE_LOCAL_SSDS_EXT", "NODE_LOCAL_SSDS_EPHEMERAL"},
+			wantNotEnv:    []string{"NODE_LOCAL_NVME_SSD_BLOCK_EXT", "NODE_EPHEMERAL_STORAGE_LOCAL_SSD"},
 			wantNotLabels: []string{"cloud.google.com/gke-local-nvme-ssd", "cloud.google.com/gke-ephemeral-storage-local-ssd"},
 		},
 	}

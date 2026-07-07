@@ -96,6 +96,12 @@ type TestCase struct {
 	// instance is provisioned with that many local SSDs (configurable
 	// families) or fails launch (bundled-SKU mismatch / value above family max).
 	PodLocalSSDCount string
+	// PodEphemeralStorage, when non-empty, sets the workload pod's
+	// resources.requests.ephemeral-storage (e.g. "800Gi") via RunProvisioningTest.
+	// Drives Ephemeral-mode capacity-only scheduling: with no instance-local-ssd-count
+	// label on the pod, the scheduler must pick the smallest local-SSD count variant
+	// whose advertised ephemeral-storage allocatable satisfies the request.
+	PodEphemeralStorage string
 	// ExtraRequirements appends extra requirements to the NodePool template.
 	// Use sparingly — the common case is one of the dedicated fields above.
 	ExtraRequirements []map[string]any
@@ -529,6 +535,9 @@ type DeploymentOptions struct {
 	ExtraNodeSelectors map[string]string
 	// Annotations are added to the pod template metadata.
 	Annotations map[string]string
+	// EphemeralStorageRequest, when non-empty, sets the inflate container's
+	// resources.requests.ephemeral-storage (e.g. "800Gi").
+	EphemeralStorageRequest string
 }
 
 // CreateDeployment creates a single-replica Deployment of the pause container
@@ -576,6 +585,9 @@ func (e *Environment) CreateDeploymentWithOptions(
 				},
 			},
 		}},
+	}
+	if opts.EphemeralStorageRequest != "" {
+		podSpec.Containers[0].Resources.Requests[corev1.ResourceEphemeralStorage] = resource.MustParse(opts.EphemeralStorageRequest)
 	}
 	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: TestNamespace},

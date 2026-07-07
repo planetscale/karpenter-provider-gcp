@@ -216,20 +216,30 @@ func (p *DefaultProvider) injectOfferings(ctx context.Context, staticInstanceTyp
 }
 
 // ssdCountVariants returns the local-SSD counts to emit as separate
-// InstanceType variants for this machine type. Configurable families
-// (n1/n2/n2d/c2/c2d) get {0} ∪ AllowedLocalSSDCounts so the scheduler can
-// pick the smallest count that satisfies a pod's ephemeral-storage demand.
-// Bundled-SSD SKUs get a single variant pinned to the bundled count.
-// Everything else gets a single {0} variant.
+// InstanceType variants for this machine type. Configurable (1st/2nd-gen)
+// families get {0} plus AllowedLocalSSDCounts so the scheduler can pick the
+// smallest count that satisfies a pod's ephemeral-storage demand. Fixed-count
+// local-SSD SKUs get a single variant pinned to the bundled count (or no
+// variant when the API doesn't report it). No-SSD machine types get {0}.
 func ssdCountVariants(mt *computepb.MachineType) []int {
 	name := lo.FromPtr(mt.Name)
 	if localssd.FamilySupportsConfigurableLocalSSDs(name) {
 		allowed := localssd.AllowedLocalSSDCounts(name, mt.GetGuestCpus())
 		return append([]int{0}, allowed...)
 	}
-	if bls := mt.GetBundledLocalSsds(); bls != nil && bls.PartitionCount != nil && *bls.PartitionCount > 0 {
-		return []int{int(*bls.PartitionCount)}
+	// GCE populates BundledLocalSsds only for fixed-count local-SSD SKUs; it is
+	// absent (nil) for no-SSD and configurable machine types. So a non-nil
+	// BundledLocalSsds always denotes a fixed-SSD SKU: pin the reported partition
+	// count, or, if a partial API response omits the count, skip the SKU rather
+	// than emit a count=0 variant that would admit an always-SSD machine into
+	// no-SSD pools.
+	if bls := mt.GetBundledLocalSsds(); bls != nil {
+		if bls.PartitionCount != nil && *bls.PartitionCount > 0 {
+			return []int{int(*bls.PartitionCount)}
+		}
+		return nil
 	}
+	// nil BundledLocalSsds: an ordinary no-SSD machine type.
 	return []int{0}
 }
 

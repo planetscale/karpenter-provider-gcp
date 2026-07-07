@@ -217,11 +217,14 @@ func computeRequirements(mt *computepb.MachineType, offerings cloudprovider.Offe
 	instanceTypeParts := strings.Split(lo.FromPtr(mt.Name), "-")
 	if len(instanceTypeParts) >= 2 {
 		requirements.Get(v1alpha1.LabelInstanceCategory).Insert(extractCategory(instanceTypeParts[0]))
-		sizeOffset := 1
-		if len(instanceTypeParts) > 3 {
-			sizeOffset = 2
+		// Size is the 3rd token (family-shape-size, e.g. n2-standard-8); -lssd /
+		// -metal suffixes append further tokens but the size stays at index 2.
+		// The exception is 2-token names (e2-medium), where size is the last token.
+		sizeIdx := 1
+		if len(instanceTypeParts) >= 3 {
+			sizeIdx = 2
 		}
-		requirements.Get(v1alpha1.LabelInstanceSize).Insert(instanceTypeParts[len(instanceTypeParts)-sizeOffset])
+		requirements.Get(v1alpha1.LabelInstanceSize).Insert(instanceTypeParts[sizeIdx])
 		// The laster number of the first part is the generation
 		requirements.Get(v1alpha1.LabelInstanceGeneration).Insert(extractGeneration(instanceTypeParts[0]))
 		requirements.Get(v1alpha1.LabelInstanceFamily).Insert(instanceTypeParts[0])

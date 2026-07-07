@@ -24,6 +24,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 
@@ -71,6 +72,9 @@ func (e *Environment) RunProvisioningTest(ctx context.Context, tc TestCase) {
 		deployOpts.ExtraNodeSelectors = map[string]string{
 			gcpv1alpha1.LabelInstanceLocalSsdCount: tc.PodLocalSSDCount,
 		}
+	}
+	if tc.PodEphemeralStorage != "" {
+		deployOpts.EphemeralStorageRequest = tc.PodEphemeralStorage
 	}
 	e.CreateDeploymentWithOptions(ctx, name, name, name, tc.Arch, deployOpts)
 
@@ -131,7 +135,26 @@ func (e *Environment) RunProvisioningTest(ctx context.Context, tc TestCase) {
 			provisionedNodeName, gcpv1alpha1.LabelInstanceLocalSsdCount, got, expectedCountLabel)
 	}).WithTimeout(2 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
 
+	e.assertEphemeralStorageAllocatable(ctx, provisionedNodeName, tc)
+
 	e.WaitForKubeProxyRunning(ctx, provisionedNodeName)
+}
+
+// assertEphemeralStorageAllocatable verifies that an Ephemeral capacity-only node
+// advertises at least the pod's requested ephemeral-storage as allocatable,
+// proving the selected count variant's local-SSD capacity is surfaced (not the
+// boot disk). No-op when the test case did not request ephemeral-storage.
+func (e *Environment) assertEphemeralStorageAllocatable(ctx context.Context, nodeName string, tc TestCase) {
+	if tc.PodEphemeralStorage == "" {
+		return
+	}
+	req := resource.MustParse(tc.PodEphemeralStorage)
+	n, err := e.KubeClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	Expect(err).NotTo(HaveOccurred())
+	alloc := n.Status.Allocatable[corev1.ResourceEphemeralStorage]
+	Expect(alloc.Cmp(req)).To(BeNumerically(">=", 0),
+		"node %s: ephemeral-storage allocatable %s < requested %s",
+		nodeName, alloc.String(), req.String())
 }
 
 func osSlug(imageFamily string) string {

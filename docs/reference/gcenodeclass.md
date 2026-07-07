@@ -44,7 +44,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `sizeGiB` _integer_ | SizeGiB is the size of the disk. Unit: GiB |  | Optional: \{\} <br /> |
-| `category` _[DiskCategory](#diskcategory)_ | The category of the disk (e.g., pd-standard, pd-balanced, pd-ssd, pd-extreme). |  | Enum: [hyperdisk-balanced hyperdisk-balanced-high-availability hyperdisk-extreme hyperdisk-ml hyperdisk-throughput local-ssd pd-balanced pd-extreme pd-ssd pd-standard] <br />Optional: \{\} <br /> |
+| `category` _[DiskCategory](#diskcategory)_ | The category of the disk (e.g., pd-standard, pd-balanced, pd-ssd, pd-extreme). |  | Enum: [hyperdisk-balanced hyperdisk-balanced-high-availability hyperdisk-extreme hyperdisk-ml hyperdisk-throughput pd-balanced pd-extreme pd-ssd pd-standard] <br />Optional: \{\} <br /> |
 | `boot` _boolean_ | Indicates that this is a boot disk. |  | Optional: \{\} <br /> |
 | `secondaryBootImage` _string_ | SecondaryBootImage is the secondary boot disk image name (e.g. global/images/DISK_IMAGE_NAME). |  | Optional: \{\} <br /> |
 | `secondaryBootMode` _[SecondaryBootDiskMode](#secondarybootdiskmode)_ | SecondaryBootMode is the secondary boot disk mode (e.g. CONTAINER_IMAGE_CACHE). |  | Enum: [MODE_UNSPECIFIED CONTAINER_IMAGE_CACHE] <br />Optional: \{\} <br /> |
@@ -61,7 +61,7 @@ _Underlying type:_ _string_
 DiskCategory represents a disk category type
 
 _Validation:_
-- Enum: [hyperdisk-balanced hyperdisk-balanced-high-availability hyperdisk-extreme hyperdisk-ml hyperdisk-throughput local-ssd pd-balanced pd-extreme pd-ssd pd-standard]
+- Enum: [hyperdisk-balanced hyperdisk-balanced-high-availability hyperdisk-extreme hyperdisk-ml hyperdisk-throughput pd-balanced pd-extreme pd-ssd pd-standard]
 
 _Appears in:_
 - [Disk](#disk)
@@ -116,7 +116,7 @@ _Appears in:_
 | `networkConfig` _[NetworkConfig](#networkconfig)_ | NetworkConfig allows overriding per-interface network settings for provisioned nodes. |  | Optional: \{\} <br /> |
 | `autoGPUTaint` _boolean_ | AutoGPUTaint, when true, automatically applies nvidia.com/gpu=present:NoSchedule<br />to any GPU node at provisioning time, regardless of the NodePool configuration.<br />Disabled by default to preserve backward compatibility. |  | Optional: \{\} <br /> |
 | `gpuDriverVersion` _string_ | GPUDriverVersion controls which NVIDIA driver version GKE installs on GPU nodes.<br />Mirrors the GKE node pool gpu_driver_installation_config.gpu_driver_version field.<br />Valid values: "default" (GKE-recommended stable), "latest" (newest, COS only),<br />"disabled" (skip automatic installation).<br />Ignored for non-GPU instance types. | default | Enum: [default latest disabled] <br />Optional: \{\} <br /> |
-| `localSsdMode` _[LocalSSDMode](#localssdmode)_ | LocalSsdMode controls how local SSDs are exposed to workloads on machine<br />types that ship local SSDs (configurable families with a non-zero count<br />pinned at scheduling time, or bundled-SSD SKUs like -lssd / z3 / a3).<br />Defaults to RawBlock. | RawBlock | Enum: [RawBlock Ephemeral] <br />Optional: \{\} <br /> |
+| `localSsdMode` _[LocalSSDMode](#localssdmode)_ | LocalSsdMode controls how a node's local SSDs are exposed to workloads.<br />RawBlock (the default) leaves them as raw, unformatted NVMe block devices.<br />Ephemeral formats them, striping multiple SSDs into a single volume, and<br />mounts them as the node's kubelet ephemeral storage. | RawBlock | Enum: [RawBlock Ephemeral] <br />Optional: \{\} <br /> |
 
 
 #### GCENodeClassStatus
@@ -233,8 +233,8 @@ _Appears in:_
 
 | Field | Description |
 | --- | --- |
-| `RawBlock` |  |
-| `Ephemeral` |  |
+| `RawBlock` | RawBlock leaves local SSDs as raw, unformatted NVMe block devices.<br /> |
+| `Ephemeral` | Ephemeral formats and mounts local SSDs as the node's kubelet ephemeral<br />storage, striping multiple SSDs into one volume.<br /> |
 
 
 #### NetworkConfig

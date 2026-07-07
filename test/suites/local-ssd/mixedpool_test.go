@@ -33,7 +33,7 @@ import (
 
 // Single-pod local-SSD coverage rides env.RunProvisioningTest from the environment package.
 // These cases run multiple pods on one NodeClass+NodePool and verify each pod
-// lands on its own correctly-sized node — the proliferation-collapse property
+// lands on its own correctly-sized node, the proliferation-collapse property
 // of the pod-label-driven design that single-pod tests can't show.
 
 var _ = Describe("Mixed local-SSD pool", func() {
@@ -103,9 +103,9 @@ func runPodOnPool(ctx context.Context, pool, suffix, instanceType, ssdCount stri
 
 // expectNodeShape asserts that node has the given instance type, exactly
 // scratchDiskCount local-SSD (SCRATCH NVMe) disks attached, and the expected
-// karpenter.k8s.gcp/instance-local-ssd-count label value ("" = expect absent).
-// The SSD-count label can lag pod-Running by a few seconds because it's
-// written by the bootstrapper, so the label check polls.
+// karpenter.k8s.gcp/instance-local-ssd-count label value. The provider stamps a
+// count on every node (including "0" for no-SSD nodes). The label can lag
+// pod-Running by a few seconds, so the check polls.
 func expectNodeShape(ctx context.Context, node *corev1.Node, instanceType string, scratchDiskCount int, expectedLabel string) {
 	Expect(node.Labels[corev1.LabelInstanceTypeStable]).To(Equal(instanceType),
 		"node %s: instance type", node.Name)
@@ -124,16 +124,10 @@ func expectNodeShape(ctx context.Context, node *corev1.Node, instanceType string
 	Eventually(func(g Gomega) {
 		n, err := env.KubeClient.CoreV1().Nodes().Get(ctx, node.Name, metav1.GetOptions{})
 		g.Expect(err).NotTo(HaveOccurred())
-		v, present := n.Labels[gcpv1alpha1.LabelInstanceLocalSsdCount]
-		if expectedLabel == "" {
-			g.Expect(present).To(BeFalse(),
-				"node %s: %s unexpectedly present (=%q)",
-				node.Name, gcpv1alpha1.LabelInstanceLocalSsdCount, v)
-			return
-		}
-		g.Expect(v).To(Equal(expectedLabel),
+		g.Expect(n.Labels).To(HaveKeyWithValue(gcpv1alpha1.LabelInstanceLocalSsdCount, expectedLabel),
 			"node %s: %s = %q, want %q",
-			node.Name, gcpv1alpha1.LabelInstanceLocalSsdCount, v, expectedLabel)
+			node.Name, gcpv1alpha1.LabelInstanceLocalSsdCount,
+			n.Labels[gcpv1alpha1.LabelInstanceLocalSsdCount], expectedLabel)
 	}).WithTimeout(2 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
 }
 

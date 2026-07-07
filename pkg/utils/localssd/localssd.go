@@ -16,31 +16,25 @@ limitations under the License.
 
 package localssd
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // DefaultPartitionGiB is the standard NVMe local SSD partition size for most GCP machine families.
 const DefaultPartitionGiB int64 = 375
-
-// configurableFamilyPrefixes lists machine-family prefixes whose SKUs accept a
-// caller-supplied local-SSD count (i.e., not bundled, not no-SSD-only).
-// Verified 2026-05 against `gcloud compute machine-types describe`; n3 is
-// deliberately absent because no n3 family currently exists in GCP.
-var configurableFamilyPrefixes = []string{"n1-", "n2-", "n2d-", "c2-", "c2d-"}
 
 // FamilySupportsConfigurableLocalSSDs reports whether the machine-type name's
 // family accepts a caller-specified local-SSD count. The scheduler uses this
 // to decide whether to emit per-count InstanceType variants (configurable)
 // or a single In:["0"] / In:["<bundled>"] requirement.
 //
-// Bundled-SSD SKUs (e.g. c4d-...-lssd, z3-..., a3-...) are NOT in this list;
+// The configurable families are the keys of configurableLocalSSDFamilies (the
+// 1st/2nd-gen series). Newer fixed-count local-SSD SKUs are not configurable;
 // they get their count from MachineType.BundledLocalSsds.PartitionCount.
 func FamilySupportsConfigurableLocalSSDs(machineName string) bool {
-	for _, p := range configurableFamilyPrefixes {
-		if strings.HasPrefix(machineName, p) {
-			return true
-		}
-	}
-	return false
+	_, ok := configurableLocalSSDFamilies[familyPrefix(machineName)]
+	return ok
 }
 
 // AllowedLocalSSDCounts returns the SSD counts GCE accepts at instance-create
@@ -48,30 +42,28 @@ func FamilySupportsConfigurableLocalSSDs(machineName string) bool {
 // per-SKU tables in GCE's machine-family docs. The set excludes 0; callers
 // emit the zero variant separately.
 //
-// Only n1, n2, n2d, c2, and c2d have count-configurable local SSDs. All newer
-// families ship bundled SSDs (machine names ending -lssd / -standardlssd /
-// -highlssd, plus a3/a4) where the count is fixed by the SKU. New families
-// are not expected to revive the configurable pattern, so this table is
-// effectively static.
+// Only the 1st/2nd-gen families carry count-configurable local SSDs. Newer
+// families ship a fixed bundled count set by the SKU, and are not expected to
+// revive the configurable pattern, so this table is effectively static.
 //
 // Returns nil for machine types not in a configurable family (gate on
 // FamilySupportsConfigurableLocalSSDs first) or below a family's minimum SKU
 // vCPU count.
 //
-// Verified 2026-05 against:
-//   - https://cloud.google.com/compute/docs/general-purpose-machines (n1, n2, n2d)
-//   - https://cloud.google.com/compute/docs/compute-optimized-machines (c2, c2d)
+// Counts come from GCE's machine-family docs:
+//   - https://cloud.google.com/compute/docs/general-purpose-machines
+//   - https://cloud.google.com/compute/docs/compute-optimized-machines
 func AllowedLocalSSDCounts(machineName string, vCPUs int32) []int {
 	family, ok := configurableLocalSSDFamilies[familyPrefix(machineName)]
 	if !ok {
 		return nil
 	}
 	if family.fixed != nil {
-		return family.fixed
+		return slices.Clone(family.fixed)
 	}
 	for _, b := range family.brackets {
 		if vCPUs >= b.minVCPUs {
-			return b.counts
+			return slices.Clone(b.counts)
 		}
 	}
 	return nil
@@ -95,7 +87,7 @@ type configurableFamily struct {
 
 // configurableLocalSSDFamilies pins the per-family GCE allowed-count tables.
 // Bracket boundaries match GCE's published per-vCPU table verbatim (e.g. n2's
-// "22–40 bracket"), not the vCPU counts of currently-predefined SKUs; the two
+// "22-40 bracket"), not the vCPU counts of currently-predefined SKUs; the two
 // coincide today but pinning to the doc rule means we stay correct if GCE
 // ever adds an intermediate SKU.
 var configurableLocalSSDFamilies = map[string]configurableFamily{

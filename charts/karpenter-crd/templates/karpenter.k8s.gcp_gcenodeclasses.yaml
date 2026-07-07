@@ -88,7 +88,6 @@ spec:
                       - hyperdisk-extreme
                       - hyperdisk-ml
                       - hyperdisk-throughput
-                      - local-ssd
                       - pd-balanced
                       - pd-extreme
                       - pd-ssd
@@ -453,10 +452,10 @@ spec:
               localSsdMode:
                 default: RawBlock
                 description: |-
-                  LocalSsdMode controls how local SSDs are exposed to workloads on machine
-                  types that ship local SSDs (configurable families with a non-zero count
-                  pinned at scheduling time, or bundled-SSD SKUs like -lssd / z3 / a3).
-                  Defaults to RawBlock.
+                  LocalSsdMode controls how a node's local SSDs are exposed to workloads.
+                  RawBlock (the default) leaves them as raw, unformatted NVMe block devices.
+                  Ephemeral formats them, striping multiple SSDs into a single volume, and
+                  mounts them as the node's kubelet ephemeral storage.
                 enum:
                 - RawBlock
                 - Ephemeral
