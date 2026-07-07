@@ -1208,19 +1208,19 @@ const z3HighSsdGiBThreshold = 18 * 1024
 // onHostMaintenancePolicy returns the GCE Scheduling.OnHostMaintenance value
 // required by the (instanceType, capacityType, machineType) tuple, or "" to
 // leave the GCE default (MIGRATE for non-spot non-metal).
-// Precedence: spot → GPU → z3-non-metal >18 TiB → z3-non-metal → bare-metal → h4d → default.
+// Precedence (first match wins): spot, GPU, z3 non-metal >18 TiB, z3 non-metal,
+// bare-metal, h4d, GCE default.
 //
-// Spot + z3-non-metal-lssd: spot requires TERMINATE, z3 non-metal lssd ≤18 TiB
-// requires MIGRATE; GCE rejects either combination. We pick TERMINATE so
-// the failure surfaces as the user's explicit spot request rather than a
-// silent flip to on-demand.
+// Spot + z3-non-metal-lssd: spot requires TERMINATE, z3 non-metal lssd at or
+// below 18 TiB requires MIGRATE; GCE rejects either combination. We pick
+// TERMINATE so the failure surfaces as the user's explicit spot request rather
+// than a silent flip to on-demand.
 //
-// z3 non-metal with >18 TiB bundled SSD: GCE rejects MIGRATE for these SKUs
-// (e.g. z3-highmem-88-highlssd, z3-highmem-176-standardlssd, both at 12 ×
-// 3000 GiB = ~35 TiB). The mt argument is the cache entry; when nil we fall
-// back to MIGRATE — the cache is normally populated for any SKU we
-// schedule, and a future high-SSD z3 SKU hitting an empty cache will fail
-// loud at GCE creation time rather than silently misbehave.
+// z3 non-metal with >18 TiB bundled SSD: GCE rejects MIGRATE for the largest z3
+// lssd SKUs. The mt argument is the cache entry; when nil we fall back to
+// MIGRATE, since the cache is normally populated for any SKU we schedule, and a
+// future high-SSD z3 SKU hitting an empty cache will fail loud at GCE creation
+// time rather than silently misbehave.
 //
 // Bare-metal (`*-metal`): physically cannot live-migrate (no VM-level state
 // to copy out-of-band). GCE's current default is TERMINATE, but we set it

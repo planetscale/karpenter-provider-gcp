@@ -160,7 +160,7 @@ func TestMatchVariantForInstance_UnknownLabelValueFallsBack(t *testing.T) {
 func TestMatchVariantForInstance_BundledSKUSingleVariant(t *testing.T) {
 	t.Parallel()
 	// Bundled-SSD families emit exactly one InstanceType per machine type.
-	// The lookup still works for them — and must, since the GCE label is
+	// The lookup still works for them, and must, since the GCE label is
 	// stamped from that variant's requirement.
 	its := []*karpcloudprovider.InstanceType{
 		variantInstanceType("c4d-standard-8-lssd", "1"),

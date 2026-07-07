@@ -181,7 +181,7 @@ func expectedSSDCountLabelValue(tc TestCase) string {
 
 // expectedScratchDiskCount derives the expected number of SCRATCH NVMe disks
 // attached to the provisioned GCE instance. Returns 0 when no SSDs are
-// expected (also a valid assertion target — we always verify the disk count).
+// expected (also a valid assertion target; we always verify the disk count).
 func expectedScratchDiskCount(tc TestCase) int {
 	switch {
 	case tc.ExpectedScratchDisks > 0:

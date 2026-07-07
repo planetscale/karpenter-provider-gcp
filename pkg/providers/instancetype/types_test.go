@@ -329,7 +329,7 @@ func TestCalculateDiskConfiguration(t *testing.T) {
 		},
 		{
 			// Legacy disks[].category=local-ssd entries no longer influence
-			// ssdCount — that comes from the variant requirement / explicit
+			// ssdCount; that comes from the variant requirement / explicit
 			// caller. The boot-disk entry is still honored.
 			name: "boot-disk entry alongside ignored legacy local-ssd entry",
 			nodeClass: &v1alpha1.GCENodeClass{
@@ -819,7 +819,7 @@ func TestComputeRequirements(t *testing.T) {
 		{
 			// Same-family mixed: c4a-standard-4 (no bundled SSDs) sits alongside
 			// c4a-standard-4-lssd (bundles 1). Asserts that the bundled-vs-not
-			// decision is driven by mt.BundledLocalSsds, not by family prefix —
+			// decision is driven by mt.BundledLocalSsds, not by family prefix:
 			// a "c4a-" SKU with no BundledLocalSsds field is treated as no-SSD.
 			name: "Mixed-family non-bundled (c4a-standard-4)",
 			mt: &computepb.MachineType{
@@ -864,9 +864,9 @@ func TestComputeRequirements(t *testing.T) {
 		},
 		{
 			// Sibling to "Mixed-family non-bundled (c4a-standard-4)": same family
-			// prefix, but BundledLocalSsds is set → emits In:["1"]. Together with
-			// the non-bundled c4a case, documents that emission is driven by the
-			// API field rather than the family prefix.
+			// prefix, but BundledLocalSsds is set, so it emits In:["1"]. Together
+			// with the non-bundled c4a case, documents that emission is driven by
+			// the API field rather than the family prefix.
 			name: "Mixed-family bundled (c4a-standard-4-lssd)",
 			mt: &computepb.MachineType{
 				Name:             lo.ToPtr("c4a-standard-4-lssd"),
@@ -968,8 +968,9 @@ func TestComputeRequirements(t *testing.T) {
 					if key == v1alpha1.LabelTopologyZoneID {
 						continue
 					}
-					// disk-type.gke.io/* emissions are table-driven per machine
-					// type and covered by the dedicated disktype test.
+					// Ignore PD disk-type compatibility labels; they are emitted by
+					// computeRequirements independently of local-SSD and are validated
+					// by TestComputeRequirementsIncludesDiskTypeCompatibility.
 					if strings.HasPrefix(key, "disk-type.gke.io/") {
 						continue
 					}
@@ -992,7 +993,7 @@ func TestComputeRequirements(t *testing.T) {
 	}
 }
 
-// TestSSDCountVariantsAscending pins variant emission order to {0, …} in
+// TestSSDCountVariantsAscending pins variant emission order to {0, ...} in
 // ascending SSD-count for every configurable family. The local sort in
 // instance.orderInstanceTypesByPrice tie-breaks on SSD-count ascending, which
 // gives no-count-selector pods the count=0 variant; that property still
@@ -1029,6 +1030,9 @@ func TestSSDCountVariantsAscending(t *testing.T) {
 			want: []int{1},
 		},
 		{
+			// No-SSD machine type: GCE leaves BundledLocalSsds nil, so this
+			// exercises the nil-bundled to {0} invariant; the no-SSD path is not
+			// dropped the way a present-but-countless bundled object is.
 			name: "no-SSD-only family emits {0}",
 			mt:   &computepb.MachineType{Name: lo.ToPtr("e2-medium"), GuestCpus: lo.ToPtr[int32](2)},
 			want: []int{0},

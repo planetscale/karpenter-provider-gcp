@@ -43,9 +43,7 @@ import (
 const staticKubeProxyCPUMilliCore = 100
 
 // NewInstanceType builds a single InstanceType variant for the given machine
-// type and local-SSD count. Callers in instancetype.List emit one variant per
-// allowed count (0 plus AllowedLocalSSDCounts) for configurable families,
-// and a single variant pinned to the bundled count (or 0) for everything else.
+// type and local-SSD count (the per-variant count comes from ssdCountVariants).
 func NewInstanceType(ctx context.Context, mt *computepb.MachineType, nodeClass *v1alpha1.GCENodeClass,
 	region string, offerings cloudprovider.Offerings, ssdCount int) *cloudprovider.InstanceType {
 	if offerings == nil {
@@ -236,11 +234,8 @@ func computeRequirements(mt *computepb.MachineType, offerings cloudprovider.Offe
 	return requirements
 }
 
-// localSSDCountRequirement emits the karpenter.k8s.gcp/instance-local-ssd-count
-// requirement pinned to the supplied count. instancetype.List picks the count
-// per variant: bundled SKUs get the bundled value; configurable families get
-// one variant per entry in {0} ∪ AllowedLocalSSDCounts; no-SSD-only families
-// get 0.
+// localSSDCountRequirement pins the instance-local-ssd-count requirement to the
+// supplied count. The count per variant is chosen by ssdCountVariants.
 func localSSDCountRequirement(ssdCount int) *scheduling.Requirement {
 	return scheduling.NewRequirement(
 		v1alpha1.LabelInstanceLocalSsdCount,
@@ -297,9 +292,8 @@ func memory(ctx context.Context, mt *computepb.MachineType) *resource.Quantity {
 	return resource.NewQuantity(totalQuantity-int64(float64(totalQuantity)*osReservedPercent), resource.DecimalSI)
 }
 
-// calculateDiskConfigGiB returns the boot disk size and total local-SSD GiB
-// for a single InstanceType variant. The caller (instancetype.List) picks the
-// ssdCount per variant; this function does not derive count from nodeClass.
+// calculateDiskConfigGiB returns the boot disk size and the total GiB for
+// ssdCount local SSDs of mt's family.
 func calculateDiskConfigGiB(nodeClass *v1alpha1.GCENodeClass, mt *computepb.MachineType, ssdCount int) (int64, int64) {
 	bootDiskGiB := int64(100)
 	if nodeClass != nil {

@@ -103,7 +103,7 @@ type TestCase struct {
 	// whose advertised ephemeral-storage allocatable satisfies the request.
 	PodEphemeralStorage string
 	// ExtraRequirements appends extra requirements to the NodePool template.
-	// Use sparingly — the common case is one of the dedicated fields above.
+	// Use sparingly; the common case is one of the dedicated fields above.
 	ExtraRequirements []map[string]any
 }
 
@@ -151,10 +151,8 @@ func (e *Environment) CreateNodeClass(ctx context.Context, name, imageFamily str
 	e.trackNodeClass(name)
 }
 
-// CreateNodeClassForLocalSSD creates a GCENodeClass using the top-level
-// spec.localSsdMode shape. Local-SSD count is selected per pod via the
-// karpenter.k8s.gcp/instance-local-ssd-count label, not on the NodeClass.
-// bootDiskCategory defaults to pd-balanced when empty.
+// CreateNodeClassForLocalSSD creates a GCENodeClass for local-SSD tests: a boot
+// disk only (no disks[].category=local-ssd) plus the top-level spec.localSsdMode.
 func (e *Environment) CreateNodeClassForLocalSSD(
 	ctx context.Context, name, imageFamily, bootDiskCategory string,
 	mode gcpv1alpha1.LocalSSDMode,

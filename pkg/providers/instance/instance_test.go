@@ -2026,7 +2026,7 @@ func TestOnHostMaintenancePolicy(t *testing.T) {
 	t.Parallel()
 
 	// Mirror the instancetype builder: every instance type defines the GPU
-	// count label — OpIn("1") on GPU SKUs, OpDoesNotExist otherwise.
+	// count label: OpIn("1") on GPU SKUs, OpDoesNotExist otherwise.
 	newIT := func(name string, gpu bool) *cloudprovider.InstanceType {
 		gpuReq := scheduling.NewRequirement(v1alpha1.LabelInstanceGPUCount, corev1.NodeSelectorOpDoesNotExist)
 		if gpu {
@@ -2169,7 +2169,7 @@ func TestVariantSSDCount(t *testing.T) {
 // TestOrderInstanceTypesByPrice_Case1_NoCountSelector covers the dominant
 // pod shape: instance-type pinned, no instance-local-ssd-count selector.
 // Variants share Name and price; the SSD-count tie-break must put count=0
-// first deterministically — otherwise the unstable sort.Slice can land the
+// first deterministically, otherwise the unstable sort.Slice can land the
 // pod on a random non-zero variant.
 func TestOrderInstanceTypesByPrice_Case1_NoCountSelector(t *testing.T) {
 	t.Parallel()
@@ -2229,7 +2229,7 @@ func TestOrderInstanceTypesByPrice_Case3_EphemeralCapacity(t *testing.T) {
 		scheduling.NewRequirement(karpv1.CapacityTypeLabelKey, corev1.NodeSelectorOpIn, karpv1.CapacityTypeOnDemand),
 	)
 
-	// Simulate Karpenter-side capacity filter: pod wants ≥500 GiB ephemeral,
+	// Simulate Karpenter-side capacity filter: pod wants >=500 GiB ephemeral,
 	// so count=0 (0 GiB) and count=1 (375 GiB) variants are pre-filtered
 	// out; the helper sees {2, 4, 8, 16, 24} all satisfying.
 	in := []*cloudprovider.InstanceType{

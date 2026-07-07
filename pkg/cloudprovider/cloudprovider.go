@@ -162,7 +162,7 @@ func (c *CloudProvider) resolveInstanceTypeFromInstance(ctx context.Context, ins
 
 // matchVariantForInstance maps a live GCE VM back to one of the
 // *cloudprovider.InstanceType records this provider previously offered to
-// Karpenter — used during List/Get reconciliation to rebuild a NodeClaim.
+// Karpenter, used during List/Get reconciliation to rebuild a NodeClaim.
 //
 // Most GCE machine families produce one InstanceType per Name, so a Name
 // lookup suffices. Configurable-local-SSD families (e.g. n2d-standard-8 with
