@@ -121,7 +121,7 @@ The field controls how GKE bootstrap metadata exposes local SSDs when the select
 
 `RawBlock` is the safer default because it does not make positive-count local SSD nodes advertise large Kubernetes `ephemeral-storage` capacity unless the user explicitly opts into that behavior.
 
-Because `localSsdMode` changes bootstrap metadata and advertised capacity, the field is included in `GCENodeClass.Hash()`, and `GCENodeClassHashVersion` is bumped to `v4` so existing nodes drift when the effective mode changes.
+Because `localSsdMode` changes bootstrap metadata and advertised capacity, the field is included in `GCENodeClass.Hash()`, and `GCENodeClassHashVersion` is bumped to `v5`. The version change prevents existing `v4` NodeClaims from drifting solely because `RawBlock` is newly defaulted; subsequent mode changes on `v5` NodeClasses trigger drift through the changed hash.
 
 #### `karpenter.k8s.gcp/instance-local-ssd-count`
 
@@ -412,7 +412,7 @@ Sorting alone is not correctness. The selected shape must survive through create
 The feature is complete when:
 
 - [ ] `GCENodeClass.spec.localSsdMode` exists with validation for `RawBlock` and `Ephemeral`, defaulting to `RawBlock`.
-- [ ] `GCENodeClass.Hash()` includes `localSsdMode`; `GCENodeClassHashVersion` is bumped to `v4`.
+- [ ] `GCENodeClass.Hash()` includes `localSsdMode`; `GCENodeClassHashVersion` is bumped to `v5`.
 - [ ] `karpenter.k8s.gcp/instance-local-ssd-count` is registered as a well-known provider label.
 - [ ] 1st/2nd generation machine types emit same-name per-count variants.
 - [ ] 3rd/4th+ generation fixed-count local SSD machine types emit one fixed-count variant.

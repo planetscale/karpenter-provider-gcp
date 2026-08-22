@@ -106,10 +106,13 @@ func TestAreStaticFieldsDrifted(t *testing.T) {
 			want:      "",
 		},
 		{
-			name:      "no drift when hash versions mismatch",
-			nodeClass: nodeClass("abc123", "v99"),
-			nodeClaim: nodeClaim("abc123"),
-			want:      "",
+			name:      "no drift when NodeClaim has old hash version",
+			nodeClass: nodeClass("abc123", v1alpha1.GCENodeClassHashVersion),
+			nodeClaim: &karpv1.NodeClaim{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+				v1alpha1.AnnotationGCENodeClassHash:        "def456",
+				v1alpha1.AnnotationGCENodeClassHashVersion: "v4",
+			}}},
+			want: "",
 		},
 		{
 			name:      "no drift when all annotations absent",
@@ -206,7 +209,8 @@ func TestNodeClassDriftFieldCoverage(t *testing.T) {
 				ImageSelectorTerms: []v1alpha1.ImageSelectorTerm{
 					{Alias: "ContainerOptimizedOS@latest"},
 				},
-				ImageFamily: &cos,
+				ImageFamily:  &cos,
+				LocalSsdMode: v1alpha1.LocalSSDModeRawBlock,
 			},
 		}
 	}
@@ -299,6 +303,13 @@ func TestNodeClassDriftFieldCoverage(t *testing.T) {
 				nc.Spec.NetworkConfig = &v1alpha1.NetworkConfig{
 					Subnetwork: "regions/us-central1/subnetworks/custom",
 				}
+			},
+			want: NodeClassDrift,
+		},
+		{
+			name: "LocalSsdMode",
+			mutate: func(nc *v1alpha1.GCENodeClass) {
+				nc.Spec.LocalSsdMode = v1alpha1.LocalSSDModeEphemeral
 			},
 			want: NodeClassDrift,
 		},
