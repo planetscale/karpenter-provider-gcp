@@ -20,8 +20,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -133,7 +135,7 @@ func (p *DefaultProvider) GetMachineType(name string) *computepb.MachineType {
 }
 
 func (p *DefaultProvider) validateState() error {
-	if len(p.instanceTypesInfo) == 0 {
+	if len(p.instanceTypesByName) == 0 {
 		return fmt.Errorf("no instance types found")
 	}
 
@@ -179,7 +181,8 @@ func (p *DefaultProvider) getStaticInstanceTypes(ctx context.Context, nodeClass 
 	}
 
 	instanceTypes := []staticInstanceType{}
-	for _, mt := range p.instanceTypesInfo {
+	for _, name := range slices.Sorted(maps.Keys(p.instanceTypesByName)) {
+		mt := p.instanceTypesByName[name]
 		instanceType := lo.FromPtr(mt.Name)
 		if instanceType == "" || mt.MemoryMb == nil || mt.GuestCpus == nil {
 			continue

@@ -25,7 +25,9 @@ import (
 	"cloud.google.com/go/compute/apiv1/computepb"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/scheduling"
@@ -103,6 +105,52 @@ func TestListCacheKeyCoversLocalSsdMode(t *testing.T) {
 
 	assert.Equal(t, 2, p.staticInstanceTypesCache.ItemCount(),
 		"different LocalSsdMode must produce different static cache entries")
+}
+
+func TestListRequiresInstanceTypesByName(t *testing.T) {
+	ctx := options.ToContext(context.Background(), &options.Options{VMMemoryOverheadPercent: 0.07})
+	p := newTestProvider()
+	p.instanceTypesByName = nil
+
+	_, err := p.List(ctx, &v1alpha1.GCENodeClass{})
+	require.EqualError(t, err, "no instance types found")
+}
+
+func TestListDeduplicatesMachineTypesByNameBeforeVariantExpansion(t *testing.T) {
+	ctx := options.ToContext(context.Background(), &options.Options{VMMemoryOverheadPercent: 0.07})
+	p := newTestProvider()
+
+	n2 := p.instanceTypesInfo[0]
+	n2.Zone = lo.ToPtr("zones/us-central1-a")
+	n2.SelfLink = lo.ToPtr("projects/test-project/zones/us-central1-a/machineTypes/n2-standard-4")
+	n2Duplicate := &computepb.MachineType{
+		Name:      lo.ToPtr("n2-standard-4"),
+		GuestCpus: lo.ToPtr[int32](4),
+		MemoryMb:  lo.ToPtr[int32](16384),
+		Zone:      lo.ToPtr("zones/us-central1-b"),
+		SelfLink:  lo.ToPtr("projects/test-project/zones/us-central1-b/machineTypes/n2-standard-4"),
+	}
+	c4 := &computepb.MachineType{
+		Name:      lo.ToPtr("c4-standard-2"),
+		GuestCpus: lo.ToPtr[int32](2),
+		MemoryMb:  lo.ToPtr[int32](7680),
+	}
+	p.instanceTypesInfo = []*computepb.MachineType{n2, c4, n2Duplicate}
+	p.instanceTypesByName = map[string]*computepb.MachineType{
+		"n2-standard-4": n2,
+		"c4-standard-2": c4,
+	}
+	p.instanceTypesOfferings["c4-standard-2"] = sets.New("us-central1-a")
+
+	instanceTypes, err := p.List(ctx, &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{
+		LocalSsdMode: v1alpha1.LocalSSDModeRawBlock,
+	}})
+	require.NoError(t, err)
+	require.Len(t, instanceTypes, 1+len(ssdCountVariants(n2)))
+	assert.Equal(t, "c4-standard-2", instanceTypes[0].Name)
+	for _, it := range instanceTypes[1:] {
+		assert.Equal(t, "n2-standard-4", it.Name)
+	}
 }
 
 func TestListUnavailableOfferingsDoNotGrowStaticCache(t *testing.T) {
