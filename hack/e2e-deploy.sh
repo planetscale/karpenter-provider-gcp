@@ -16,6 +16,8 @@
 # build use that session and ADC; no key file is read here directly.
 #
 # Optional env vars:
+#   GOOGLE_APPLICATION_CREDENTIALS  path to service-account key JSON
+#                                   (not needed if `gcloud auth login` is already active)
 #   RELEASE_VERSION   published chart version to install (e.g. 0.3.2)
 #   E2E_PREFIX        resource name prefix (default: karpenter-e2e)
 #   E2E_REGION        GCP region (default: us-central1)
@@ -23,6 +25,11 @@ set -euo pipefail
 
 : "${E2E_PROJECT_ID:?E2E_PROJECT_ID must be set}"
 : "${E2E_LOCATION:?E2E_LOCATION must be set}"
+
+if [ -z "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]; then
+  ACTIVE_ACCOUNT="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null)"
+  : "${ACTIVE_ACCOUNT:?No active gcloud login found and GOOGLE_APPLICATION_CREDENTIALS is not set. Run 'gcloud auth login' or set GOOGLE_APPLICATION_CREDENTIALS.}"
+fi
 
 E2E_PREFIX="${E2E_PREFIX:-karpenter-e2e}"
 E2E_REGION="${E2E_REGION:-us-central1}"

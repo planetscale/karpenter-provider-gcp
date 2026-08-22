@@ -18,6 +18,7 @@ package instance
 
 import (
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -108,6 +109,12 @@ func applyNodeClassKubeletConfig(config *kubeletconfig.KubeletConfiguration, ove
 	if overlay.CPUCFSQuota != nil {
 		config.CPUCFSQuota = overlay.CPUCFSQuota
 	}
+	if overlay.SerializeImagePulls != nil {
+		config.SerializeImagePulls = overlay.SerializeImagePulls
+	}
+	if overlay.MaxParallelImagePulls != nil {
+		config.MaxParallelImagePulls = overlay.MaxParallelImagePulls
+	}
 }
 
 func mergeKubeletQuantityMap(target *map[string]string, overlay map[string]v1alpha1.KubeletQuantity) {
@@ -139,7 +146,5 @@ func mergeStringMap(target *map[string]string, values map[string]string) {
 	if *target == nil {
 		*target = map[string]string{}
 	}
-	for key, value := range values {
-		(*target)[key] = value
-	}
+	maps.Copy(*target, values)
 }

@@ -138,16 +138,6 @@ func NewStaticInstanceType(ctx context.Context, mt *computepb.MachineType, nodeC
 	return it
 }
 
-func extractCategory(part string) string {
-	i := 0
-	for ; i < len(part); i++ {
-		if part[i] >= '0' && part[i] <= '9' {
-			break
-		}
-	}
-	return part[:i]
-}
-
 //nolint:gocyclo
 func computeRequirements(mt *computepb.MachineType, offerings cloudprovider.Offerings, region string, ssdCount int) scheduling.Requirements {
 	requirements := scheduling.NewRequirements(
@@ -168,9 +158,7 @@ func computeRequirements(mt *computepb.MachineType, offerings cloudprovider.Offe
 
 		// Well Known to Google Cloud
 		scheduling.NewRequirement(v1alpha1.LabelInstanceCPU, corev1.NodeSelectorOpIn, fmt.Sprintf("%d", mt.GetGuestCpus())),
-		scheduling.NewRequirement(v1alpha1.LabelInstanceCPUModel, corev1.NodeSelectorOpDoesNotExist),
 		scheduling.NewRequirement(v1alpha1.LabelInstanceMemory, corev1.NodeSelectorOpIn, fmt.Sprintf("%d", mt.GetMemoryMb())),
-		scheduling.NewRequirement(v1alpha1.LabelInstanceCategory, corev1.NodeSelectorOpDoesNotExist),
 		scheduling.NewRequirement(v1alpha1.LabelInstanceFamily, corev1.NodeSelectorOpDoesNotExist),
 		scheduling.NewRequirement(v1alpha1.LabelInstanceShape, corev1.NodeSelectorOpDoesNotExist),
 		scheduling.NewRequirement(v1alpha1.LabelInstanceGeneration, corev1.NodeSelectorOpDoesNotExist),
@@ -210,19 +198,15 @@ func computeRequirements(mt *computepb.MachineType, offerings cloudprovider.Offe
 		requirements.Get(v1alpha1.LabelGKEAccelerator).Insert(gpuName)
 	}
 
-	// The format looks like: n1-standard-1, the family is n1-standard, the category is n, the instance size is 1
-	// Also, there is something like e2-medium, the family is e2, the category is e, the instance size is medium
+	// The format looks like: n1-standard-1, the family is n1, the instance size is 1.
+	// Also, there is something like e2-medium, the family is e2, the instance size is medium.
 	instanceTypeParts := strings.Split(lo.FromPtr(mt.Name), "-")
 	if len(instanceTypeParts) >= 2 {
-		requirements.Get(v1alpha1.LabelInstanceCategory).Insert(extractCategory(instanceTypeParts[0]))
-		// Size is the 3rd token (family-shape-size, e.g. n2-standard-8); -lssd /
-		// -metal suffixes append further tokens but the size stays at index 2.
-		// The exception is 2-token names (e2-medium), where size is the last token.
-		sizeIdx := 1
-		if len(instanceTypeParts) >= 3 {
-			sizeIdx = 2
+		sizeOffset := 1
+		if len(instanceTypeParts) > 3 {
+			sizeOffset = 2
 		}
-		requirements.Get(v1alpha1.LabelInstanceSize).Insert(instanceTypeParts[sizeIdx])
+		requirements.Get(v1alpha1.LabelInstanceSize).Insert(instanceTypeParts[len(instanceTypeParts)-sizeOffset])
 		// The laster number of the first part is the generation
 		requirements.Get(v1alpha1.LabelInstanceGeneration).Insert(extractGeneration(instanceTypeParts[0]))
 		requirements.Get(v1alpha1.LabelInstanceFamily).Insert(instanceTypeParts[0])

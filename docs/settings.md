@@ -13,6 +13,7 @@ Feature gates control opt-in or experimental behaviors. They are passed as a com
 | `SpotToSpotConsolidation` | `controller.featureGates.spotToSpotConsolidation` | `true`  | Beta   | Allows consolidation to replace a Spot node with a cheaper Spot node (both single- and multi-node).                                                                                            |
 | `NodeOverlay`             | `controller.featureGates.nodeOverlay`             | `false` | Alpha  | Applies `NodeOverlay` resources to instance type scheduling decisions.                                                                                                                         |
 | `StaticCapacity`          | `controller.featureGates.staticCapacity`          | `false` | Alpha  | Enables NodePools with `spec.replicas` set to maintain a fixed number of nodes regardless of pod demand.                                                                                       |
+| `CapacityBuffer`          | `controller.featureGates.capacityBuffer`          | `false` | Alpha  | Enables `CapacityBuffer` resources to pre-provision spare capacity.                                                                                                                            |
 
 Example Helm override to enable `NodeRepair`:
 
@@ -22,17 +23,40 @@ controller:
     nodeRepair: true
 ```
 
+### CapacityBuffer (Alpha)
+
+`CapacityBuffer` is an Alpha feature that pre-provisions spare capacity so pending pods can schedule without waiting for new nodes. It is disabled by default; enable it with `controller.featureGates.capacityBuffer`. This provider does not install the `autoscaling.x-k8s.io/v1beta1` `CapacityBuffer` CRD; neither the `karpenter-crd` chart nor the `karpenter` chart ships it. GKE provides the CRD natively starting at cluster version `1.35.2-gke.1842000`. Enabling `controller.featureGates.capacityBuffer` on a cluster where the CRD is not already installed fails at template-render time during `helm install` or `helm upgrade`.
+
+```yaml
+controller:
+  featureGates:
+    capacityBuffer: true
+```
+
 ## Controller Options
 
 These options configure the controller's runtime behavior.
 
-| Option                        | Env var                     | Helm value                              | Default | Description                                                                                                                                       |
-|-------------------------------|-----------------------------|-----------------------------------------|---------|---------------------------------------------------------------------------------------------------------------------------------------------------|
-| `--disable-controller-warmup` | `DISABLE_CONTROLLER_WARMUP` | `controller.disableControllerWarmup`    | `true`  | When `false`, controllers pre-populate caches before winning leader election, reducing failover time. Set to `false` in production for better HA. |
-| `--log-level`                 | `LOG_LEVEL`                 | `logLevel`                              | `info`  | Controller log level (`debug`, `info`, `warn`, `error`).                                                                                          |
-| `--batch-max-duration`        | `BATCH_MAX_DURATION`        | `controller.settings.batchMaxDuration`  | `10s`   | Maximum time Karpenter batches incoming pods before provisioning.                                                                                 |
-| `--batch-idle-duration`       | `BATCH_IDLE_DURATION`       | `controller.settings.batchIdleDuration` | `1s`    | Idle time after the last pod event before Karpenter triggers provisioning.                                                                        |
-| `--ignore-dra-requests`       | `IGNORE_DRA_REQUESTS`       | `controller.settings.ignoreDRARequests` | `true`  | When `true`, Karpenter ignores pods' Dynamic Resource Allocation requests during scheduling simulations.                                          |
+| Option                        | Env var                     | Helm value                              | Default   | Description                                                                                                                                       |
+|-------------------------------|-----------------------------|-----------------------------------------|-----------|---------------------------------------------------------------------------------------------------------------------------------------------------|
+| `--disable-controller-warmup` | `DISABLE_CONTROLLER_WARMUP` | `controller.disableControllerWarmup`    | `true`    | When `false`, controllers pre-populate caches before winning leader election, reducing failover time. Set to `false` in production for better HA. |
+| `--log-level`                 | `LOG_LEVEL`                 | `logLevel`                              | `info`    | Controller log level (`debug`, `info`, `warn`, `error`).                                                                                          |
+| `--batch-max-duration`        | `BATCH_MAX_DURATION`        | `controller.settings.batchMaxDuration`  | `10s`     | Maximum time Karpenter batches incoming pods before provisioning.                                                                                 |
+| `--batch-idle-duration`       | `BATCH_IDLE_DURATION`       | `controller.settings.batchIdleDuration` | `1s`      | Idle time after the last pod event before Karpenter triggers provisioning.                                                                        |
+| `--ignore-dra-requests`       | `IGNORE_DRA_REQUESTS`       | `controller.settings.ignoreDRARequests` | `true`    | When `true`, Karpenter ignores pods' Dynamic Resource Allocation requests during scheduling simulations.                                          |
+| `--preference-policy`         | `PREFERENCE_POLICY`         | `controller.settings.preferencePolicy`  | `Respect` | How Karpenter handles soft scheduling preferences. Valid values are `Respect` and `Ignore`.                                                       |
+
+### Preference policy
+
+`controller.settings.preferencePolicy` defaults to `Respect`, which retains soft scheduling preferences during provisioning and consolidation. Set it to `Ignore` to disregard `preferredDuringSchedulingIgnoredDuringExecution` node affinity, pod affinity, and pod anti-affinity, as well as topology spread constraints with `whenUnsatisfiable: ScheduleAnyway`.
+
+`Ignore` does not bypass required node or pod affinity/anti-affinity, topology spread constraints with `whenUnsatisfiable: DoNotSchedule`, taints, resource requirements, PodDisruptionBudgets, or other disruption controls.
+
+```yaml
+controller:
+  settings:
+    preferencePolicy: Ignore
+```
 
 ### Dynamic Resource Allocation (DRA)
 
@@ -40,7 +64,7 @@ Dynamic Resource Allocation (DRA) is a Kubernetes API for requesting and sharing
 
 Karpenter ignores DRA requests during scheduling simulations by default (`controller.settings.ignoreDRARequests: true`). This preserves scheduling behavior for clusters without DRA drivers, the common case on GKE.
 
-Set `ignoreDRARequests` to `false` only when the cluster has DRA drivers installed and runs workloads that schedule against `ResourceClaim`s. When disabled, Karpenter registers the upstream device-allocation controller and accounts for DRA device availability when provisioning.
+Set `ignoreDRARequests` to `false` only when the cluster has DRA drivers installed and runs workloads that schedule against `ResourceClaim`s. When disabled, Karpenter registers the upstream device-allocation controller and accounts for already-published in-cluster DRA device availability. The GCP provider does not yet publish instance-type DRA device templates for provisioning new accelerator nodes.
 
 ```yaml
 controller:
@@ -147,6 +171,18 @@ podDisruptionBudget:
 ## NodePool Features
 
 These fields are set on `NodePool` objects, not on the controller. They are part of the karpenter-core API and are available in this provider.
+
+### Balanced consolidation policy (v1.14)
+
+Karpenter core v1.14 adds a third value, `Balanced`, to `spec.disruption.consolidationPolicy`, alongside `WhenEmpty` and `WhenEmptyOrUnderutilized`. `Balanced` sits between the two: it scores each consolidation action by weighing the share of NodePool cost it saves against the pod disruption it causes, and proceeds only when the savings justify the disruption. Higher-priority pods carry more disruption weight, so nodes running them are less likely to be consolidated. Reach for it when `WhenEmptyOrUnderutilized` churns too much on marginal consolidations but `WhenEmpty` leaves too much idle capacity. The default is unchanged (`WhenEmptyOrUnderutilized`).
+
+```yaml
+apiVersion: karpenter.sh/v1
+kind: NodePool
+spec:
+  disruption:
+    consolidationPolicy: Balanced
+```
 
 ### Karpenter core v1.13
 
