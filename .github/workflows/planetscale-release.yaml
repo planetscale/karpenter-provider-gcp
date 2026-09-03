@@ -1,0 +1,84 @@
+name: PlanetScale image release
+
+run-name: Publish ${{ inputs.source_ref }} to GHCR
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Branch, tag, or commit SHA to build
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    if: github.repository == 'planetscale/karpenter-provider-gcp'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: true
+
+      - name: Resolve source
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_sha="$(git rev-parse HEAD)"
+          version="$(git describe --tags --always | sed 's/^v//')"
+          {
+            echo "sha=${source_sha}"
+            echo "tag=sha-${source_sha}"
+            echo "version=${version}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Set up ko
+        uses: ko-build/setup-ko@61b4d1d396f5b2e7d6bb6fefdce3dc38d1a13445 # v0.10
+
+      - name: Log in to GHCR
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+
+      - name: Build and publish image
+        id: publish
+        shell: bash
+        env:
+          KO_DOCKER_REPO: ghcr.io/planetscale/karpenter-provider-gcp
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          IMAGE_TAG: ${{ steps.source.outputs.tag }}
+          VERSION: ${{ steps.source.outputs.version }}
+        run: |
+          set -euo pipefail
+          image_ref="$(
+            GOFLAGS='' ko build \
+              --bare \
+              --platform linux/amd64,linux/arm64 \
+              --tags "${IMAGE_TAG}" \
+              --ldflags "-X=sigs.k8s.io/karpenter/pkg/operator.Version=${VERSION}" \
+              github.com/cloudpilot-ai/karpenter-provider-gcp/cmd/controller
+          )"
+          echo "image_ref=${image_ref}" >> "${GITHUB_OUTPUT}"
+          {
+            echo '### Published image'
+            echo
+            echo "- Source: \`${SOURCE_SHA}\`"
+            echo "- Image: \`${image_ref}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
