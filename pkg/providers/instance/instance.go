@@ -77,13 +77,6 @@ var InsufficientCapacityErrorCodes = sets.NewString(
 	"IP_SPACE_EXHAUSTED",
 )
 
-type insufficientCapacityDetails struct {
-	code             string
-	structuredReason string
-	message          string
-	operation        string
-}
-
 type Provider interface {
 	Create(context.Context, *v1alpha1.GCENodeClass, *karpv1.NodeClaim, []*cloudprovider.InstanceType) (*Instance, error)
 	Get(context.Context, string) (*Instance, error)
@@ -189,11 +182,15 @@ func waitForNextTick(ctx context.Context, ticker *time.Ticker) error {
 }
 
 func (p *DefaultProvider) handleZoneOperationError(ctx context.Context, op *compute.Operation, instanceType, zone, capacityType string) error {
-	details, found := extractOperationInsufficientCapacityDetails(op)
+	capacityError, found := lo.Find(op.Error.Errors, isInsufficientCapacityError)
 	if found {
-		ttl := insufficientCapacityBackoffTTL(details.code)
-		p.unavailableOfferings.MarkUnavailableWithTTL(ctx, details.message, instanceType, zone, capacityType, ttl)
-		return newInsufficientCapacityError(instanceType, zone, capacityType, ttl, details)
+		reason := capacityError.Message
+		if reason == "" {
+			reason = capacityError.Code
+		}
+		ttl := insufficientCapacityBackoffTTL(capacityError.Code)
+		p.unavailableOfferings.MarkUnavailableWithTTL(ctx, reason, instanceType, zone, capacityType, ttl)
+		return cloudprovider.NewInsufficientCapacityError(fmt.Errorf("zone %s insufficient capacity: %s", zone, reason))
 	}
 
 	errorMsgs := lo.Map(op.Error.Errors, func(e *compute.OperationErrorErrors, _ int) string {
@@ -217,74 +214,23 @@ func isInsufficientCapacityError(operationError *compute.OperationErrorErrors) b
 	return InsufficientCapacityErrorCodes.Has(operationError.Code)
 }
 
-func extractOperationInsufficientCapacityDetails(op *compute.Operation) (insufficientCapacityDetails, bool) {
-	if op == nil || op.Error == nil {
-		return insufficientCapacityDetails{}, false
-	}
-
-	capacityError, found := lo.Find(op.Error.Errors, isInsufficientCapacityError)
-	if !found {
-		return insufficientCapacityDetails{}, false
-	}
-
-	details := insufficientCapacityDetails{
-		code:      capacityError.Code,
-		message:   capacityError.Message,
-		operation: op.Name,
-	}
-	for _, detail := range capacityError.ErrorDetails {
-		if detail == nil {
-			continue
-		}
-		if details.structuredReason == "" && detail.ErrorInfo != nil {
-			details.structuredReason = detail.ErrorInfo.Reason
-		}
-		if detail.LocalizedMessage != nil && detail.LocalizedMessage.Message != "" {
-			details.message = detail.LocalizedMessage.Message
-		}
-	}
-	if details.message == "" {
-		details.message = details.code
-	}
-	return details, true
-}
-
-func extractInsertInsufficientCapacityDetails(err error) (insufficientCapacityDetails, bool) {
+func extractInsertInsufficientCapacityReason(err error) (string, string, bool) {
 	var apiError *googleapi.Error
 	if !errors.As(err, &apiError) {
-		return insufficientCapacityDetails{}, false
+		return "", "", false
 	}
 
 	for _, detail := range apiError.Errors {
 		if InsufficientCapacityErrorCodes.Has(detail.Reason) {
-			message := detail.Message
-			if message == "" {
-				message = detail.Reason
+			reason := detail.Message
+			if reason == "" {
+				reason = detail.Reason
 			}
-			return insufficientCapacityDetails{
-				code:             detail.Reason,
-				structuredReason: detail.Reason,
-				message:          message,
-			}, true
+			return reason, detail.Reason, true
 		}
 	}
 
-	return insufficientCapacityDetails{}, false
-}
-
-func newInsufficientCapacityError(instanceType, zone, capacityType string, ttl time.Duration, details insufficientCapacityDetails) error {
-	gceDetails := []string{}
-	if details.structuredReason != "" && details.structuredReason != details.code {
-		gceDetails = append(gceDetails, "reason="+details.structuredReason)
-	}
-	if details.operation != "" {
-		gceDetails = append(gceDetails, "op="+details.operation)
-	}
-	gceDetails = append(gceDetails, "code="+details.code)
-	return cloudprovider.NewInsufficientCapacityError(fmt.Errorf(
-		"%s %s/%s unavailable %s (%s): %s",
-		instanceType, capacityType, zone, ttl, strings.Join(gceDetails, ", "), details.message,
-	))
+	return "", "", false
 }
 
 func insufficientCapacityBackoffTTL(reasonCode string) time.Duration {
@@ -412,6 +358,10 @@ func (p *DefaultProvider) Create(ctx context.Context, nodeClass *v1alpha1.GCENod
 	}
 
 	joined := errors.Join(errs...)
+	if lo.SomeBy(errs, cloudprovider.IsInsufficientCapacityError) {
+		return nil, cloudprovider.NewInsufficientCapacityError(fmt.Errorf("failed to create instance after trying all instance types: %w", joined))
+	}
+
 	return nil, fmt.Errorf("failed to create instance after trying all instance types: %w", joined)
 }
 
@@ -478,15 +428,18 @@ func (p *DefaultProvider) getOrCreateInstance(ctx context.Context, nodeClaim *ka
 	}
 	op, err := p.computeService.Instances.Insert(p.projectID, zone, instance).Context(ctx).Do()
 	if err != nil {
-		details, insufficient := extractInsertInsufficientCapacityDetails(err)
+		reason, reasonCode, insufficient := extractInsertInsufficientCapacityReason(err)
 		if insufficient {
-			ttl := insufficientCapacityBackoffTTL(details.code)
-			p.unavailableOfferings.MarkUnavailableWithTTL(ctx, details.message, instanceType.Name, zone, capacityType, ttl)
-			err = newInsufficientCapacityError(instanceType.Name, zone, capacityType, ttl, details)
+			if reason == "" {
+				reason = "insufficient capacity"
+			}
+			ttl := insufficientCapacityBackoffTTL(reasonCode)
+			p.unavailableOfferings.MarkUnavailableWithTTL(ctx, reason, instanceType.Name, zone, capacityType, ttl)
+			err = cloudprovider.NewInsufficientCapacityError(fmt.Errorf("zone %s insufficient capacity: %s", zone, reason))
 
 			// If IP space is exhausted, trying other instance types won't help as they share the same subnet.
 			// We should fail fast to avoid unnecessary API calls and noise.
-			if details.code == "IP_SPACE_EXHAUSTED" || details.code == "IP_SPACE_EXHAUSTED_WITH_DETAILS" {
+			if reasonCode == "IP_SPACE_EXHAUSTED" || reasonCode == "IP_SPACE_EXHAUSTED_WITH_DETAILS" {
 				return nil, false, err
 			}
 		}
