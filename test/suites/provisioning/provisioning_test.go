@@ -30,7 +30,7 @@ import (
 
 var _ = DescribeTable("Provisioning",
 	func(ctx SpecContext, tc environment.TestCase) {
-		runProvisioningTest(ctx, tc)
+		env.RunProvisioningTest(ctx, tc)
 	},
 	// ContainerOptimizedOS
 	Entry("COS / amd64 / on-demand", environment.TestCase{
