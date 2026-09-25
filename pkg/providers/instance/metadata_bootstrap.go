@@ -54,6 +54,27 @@ func patchSecondaryBootDisksKubeEnv(target *metadata.InstanceMetadata, nodeClass
 	}
 }
 
+// patchHugepagesKubeEnv sets the kube-env entries that GKE writes for a node
+// pool with LinuxNodeConfig.hugepages. The GKE node bootstrap reads
+// them and allocates the pages before the kubelet starts.
+func patchHugepagesKubeEnv(target *metadata.InstanceMetadata, nodeClass *v1alpha1.GCENodeClass) {
+	// The source pool may allocate hugepages, and the node class must not
+	// inherit them. The node class has no 1 GiB field, so always drop the
+	// source pool's 1 GiB page count.
+	target.UnsetKubeEnvEntry("HUGEPAGE_1G")
+
+	var pages *int32
+	if c := nodeClass.Spec.LinuxNodeConfig; c != nil && c.Hugepages != nil {
+		pages = c.Hugepages.HugepageSize2m
+	}
+	if pages != nil {
+		target.SetKubeEnvEntry("HUGEPAGE_2M", fmt.Sprintf(`"%d"`, *pages))
+		target.SetKubeEnvEntry("ENABLE_CONTAINERD_HUGETLB_CONTROLLER", `"true"`)
+	} else {
+		target.UnsetKubeEnvEntry("HUGEPAGE_2M")
+	}
+}
+
 func applyInstanceTypeKubeReserved(config *kubeletconfig.KubeletConfiguration, instanceType *cloudprovider.InstanceType) {
 	mergeStringMap(&config.KubeReserved, map[string]string{
 		"cpu":               fmt.Sprintf("%dm", instanceType.Overhead.KubeReserved.Cpu().MilliValue()),
