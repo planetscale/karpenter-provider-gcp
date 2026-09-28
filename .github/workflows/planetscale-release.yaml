@@ -30,13 +30,31 @@ jobs:
       - name: Resolve source
         id: source
         shell: bash
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
         run: |
           set -euo pipefail
           source_sha="$(git rev-parse HEAD)"
+          short_sha="${source_sha::7}"
           version="$(git describe --tags --always | sed 's/^v//')"
+          tags="sha-${source_sha}"
+
+          # Add a <ref>-<short-sha> tag unless the input was itself a commit SHA.
+          if [[ ! "${SOURCE_REF}" =~ ^[0-9a-f]{7,40}$ || "${source_sha}" != "${SOURCE_REF}"* ]]; then
+            ref="${SOURCE_REF#refs/heads/}"
+            ref="${ref#refs/tags/}"
+            # Docker tags allow [a-z0-9._-], must start with [a-z0-9_], and max out at 128 chars.
+            ref="$(printf '%s' "${ref}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g; s/-+/-/g; s/^[.-]+//')"
+            ref="${ref:0:$((128 - 1 - ${#short_sha}))}"
+            ref="$(printf '%s' "${ref}" | sed -E 's/[.-]+$//')"
+            if [[ -n "${ref}" ]]; then
+              tags="${tags},${ref}-${short_sha}"
+            fi
+          fi
+
           {
             echo "sha=${source_sha}"
-            echo "tag=sha-${source_sha}"
+            echo "tags=${tags}"
             echo "version=${version}"
           } >> "${GITHUB_OUTPUT}"
 
@@ -63,7 +81,7 @@ jobs:
         env:
           KO_DOCKER_REPO: ghcr.io/planetscale/karpenter-provider-gcp
           SOURCE_SHA: ${{ steps.source.outputs.sha }}
-          IMAGE_TAG: ${{ steps.source.outputs.tag }}
+          IMAGE_TAGS: ${{ steps.source.outputs.tags }}
           VERSION: ${{ steps.source.outputs.version }}
         run: |
           set -euo pipefail
@@ -71,7 +89,7 @@ jobs:
             GOFLAGS='' ko build \
               --bare \
               --platform linux/amd64,linux/arm64 \
-              --tags "${IMAGE_TAG}" \
+              --tags "${IMAGE_TAGS}" \
               --ldflags "-X=sigs.k8s.io/karpenter/pkg/operator.Version=${VERSION}" \
               github.com/cloudpilot-ai/karpenter-provider-gcp/cmd/controller
           )"
@@ -81,4 +99,5 @@ jobs:
             echo
             echo "- Source: \`${SOURCE_SHA}\`"
             echo "- Image: \`${image_ref}\`"
+            echo "- Tags: \`${IMAGE_TAGS}\`"
           } >> "${GITHUB_STEP_SUMMARY}"
