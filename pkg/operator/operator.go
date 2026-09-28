@@ -112,7 +112,7 @@ func NewOperator(ctx context.Context, operator *operator.Operator) (context.Cont
 		os.Exit(1)
 	}
 
-	unavailableOfferingsCache := unavailableofferings.NewUnavailableOfferings()
+	unavailableOfferingsCache := unavailableofferings.NewUnavailableOfferings(options.FromContext(ctx).UnavailableOfferingsTTL)
 	gkeProvider := gke.NewDefaultProvider(computeService, containerService,
 		options.FromContext(ctx).ProjectID,
 		options.FromContext(ctx).NodeLocation,

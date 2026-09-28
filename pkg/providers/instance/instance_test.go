@@ -107,7 +107,7 @@ func TestExtractInsertInsufficientCapacityReasonNonMatching(t *testing.T) {
 func TestInsufficientCapacityBackoffTTLForIPSpace(t *testing.T) {
 	t.Parallel()
 
-	ttl := insufficientCapacityBackoffTTL("IP_SPACE_EXHAUSTED")
+	ttl := insufficientCapacityBackoffTTL("IP_SPACE_EXHAUSTED", time.Hour)
 
 	require.Equal(t, ipSpaceInsufficientCapacityTTL, ttl)
 }
@@ -115,9 +115,9 @@ func TestInsufficientCapacityBackoffTTLForIPSpace(t *testing.T) {
 func TestInsufficientCapacityBackoffTTLForOtherReasons(t *testing.T) {
 	t.Parallel()
 
-	ttl := insufficientCapacityBackoffTTL("ZONE_RESOURCE_POOL_EXHAUSTED")
+	ttl := insufficientCapacityBackoffTTL("ZONE_RESOURCE_POOL_EXHAUSTED", time.Hour)
 
-	require.Equal(t, unavailableofferings.DefaultTTL, ttl)
+	require.Equal(t, time.Hour, ttl)
 }
 
 // newFakeComputeProvider builds a DefaultProvider whose computeService targets a fake
@@ -316,7 +316,7 @@ func TestSelectZone_OnDemandHonorsTopologyRequirement(t *testing.T) {
 		gkeProvider: &fakeGKEProvider{
 			zones: []string{"europe-west4-a", "europe-west4-b", "europe-west4-c"},
 		},
-		unavailableOfferings: unavailableofferings.NewUnavailableOfferings(),
+		unavailableOfferings: unavailableofferings.NewUnavailableOfferings(unavailableofferings.DefaultTTL),
 	}
 
 	nodeClaim := &karpv1.NodeClaim{
@@ -356,7 +356,7 @@ func TestSelectZone_FailsWhenNoZonesMatchRequirement(t *testing.T) {
 		gkeProvider: &fakeGKEProvider{
 			zones: []string{"europe-west4-a", "europe-west4-c"},
 		},
-		unavailableOfferings: unavailableofferings.NewUnavailableOfferings(),
+		unavailableOfferings: unavailableofferings.NewUnavailableOfferings(unavailableofferings.DefaultTTL),
 	}
 
 	nodeClaim := &karpv1.NodeClaim{
@@ -466,7 +466,7 @@ func TestSelectZone_SpotChoosesCheapestWithinTopologyRequirement(t *testing.T) {
 		gkeProvider: &fakeGKEProvider{
 			zones: []string{"europe-west4-a", "europe-west4-b"},
 		},
-		unavailableOfferings: unavailableofferings.NewUnavailableOfferings(),
+		unavailableOfferings: unavailableofferings.NewUnavailableOfferings(unavailableofferings.DefaultTTL),
 	}
 
 	nodeClaim := &karpv1.NodeClaim{
@@ -509,7 +509,7 @@ func TestSelectZone_OnDemandSkipsUnavailableZones(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	uo := unavailableofferings.NewUnavailableOfferings()
+	uo := unavailableofferings.NewUnavailableOfferings(unavailableofferings.DefaultTTL)
 	uo.MarkUnavailable(ctx, "ICE", "n2-standard-4", "europe-west4-a", karpv1.CapacityTypeOnDemand)
 	uo.MarkUnavailable(ctx, "ICE", "n2-standard-4", "europe-west4-c", karpv1.CapacityTypeOnDemand)
 
@@ -537,7 +537,7 @@ func TestSelectZone_OnDemandReturnsICEWhenAllZonesUnavailable(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	uo := unavailableofferings.NewUnavailableOfferings()
+	uo := unavailableofferings.NewUnavailableOfferings(unavailableofferings.DefaultTTL)
 	for _, z := range []string{"europe-west4-a", "europe-west4-b", "europe-west4-c"} {
 		uo.MarkUnavailable(ctx, "ICE", "n2-standard-4", z, karpv1.CapacityTypeOnDemand)
 	}
@@ -560,7 +560,7 @@ func TestSelectZone_SpotSkipsUnavailableZones(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	uo := unavailableofferings.NewUnavailableOfferings()
+	uo := unavailableofferings.NewUnavailableOfferings(unavailableofferings.DefaultTTL)
 	uo.MarkUnavailable(ctx, "ICE", "n2-standard-4", "europe-west4-a", karpv1.CapacityTypeSpot)
 
 	p := &DefaultProvider{
@@ -590,7 +590,7 @@ func TestSelectZone_SpotReturnsICEWhenAllZonesUnavailable(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	uo := unavailableofferings.NewUnavailableOfferings()
+	uo := unavailableofferings.NewUnavailableOfferings(unavailableofferings.DefaultTTL)
 	for _, z := range []string{"europe-west4-a", "europe-west4-b"} {
 		uo.MarkUnavailable(ctx, "ICE", "n2-standard-4", z, karpv1.CapacityTypeSpot)
 	}

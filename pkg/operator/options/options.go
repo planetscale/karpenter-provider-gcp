@@ -20,10 +20,12 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	coreoptions "sigs.k8s.io/karpenter/pkg/operator/options"
 	"sigs.k8s.io/karpenter/pkg/utils/env"
 
+	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/offerings/unavailableofferings"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/utils"
 )
 
@@ -44,6 +46,8 @@ const (
 	nodePoolServiceAccountFlagName        = "default-nodepool-service-account"
 	defaultNodePoolTemplateNameEnvVarName = "DEFAULT_NODEPOOL_TEMPLATE_NAME"
 	defaultNodePoolTemplateNameFlagName   = "default-nodepool-template-name"
+	unavailableOfferingsTTLEnvVarName     = "UNAVAILABLE_OFFERINGS_TTL"
+	unavailableOfferingsTTLFlagName       = "unavailable-offerings-ttl"
 )
 
 func init() {
@@ -64,6 +68,9 @@ type Options struct {
 	NodePoolServiceAccount      string
 	DefaultNodePoolTemplateName string
 	Interruption                bool
+	// UnavailableOfferingsTTL is how long an offering which failed with an
+	// insufficient capacity error stays unavailable for launch.
+	UnavailableOfferingsTTL time.Duration
 }
 
 func (o *Options) AddFlags(fs *coreoptions.FlagSet) {
@@ -76,6 +83,7 @@ func (o *Options) AddFlags(fs *coreoptions.FlagSet) {
 	fs.StringVar(&o.NodePoolServiceAccount, nodePoolServiceAccountFlagName, env.WithDefaultString(nodePoolServiceAccountEnvVarName, ""), "Service account to use for default node pool templates. If not set, uses <project number>-compute@developer.gserviceaccount.com")
 	fs.StringVar(&o.DefaultNodePoolTemplateName, defaultNodePoolTemplateNameFlagName, env.WithDefaultString(defaultNodePoolTemplateNameEnvVarName, ""), "Pin the bootstrap source pool by name. If set, Karpenter uses this pool exclusively and returns an error if it is not RUNNING.")
 	fs.BoolVar(&o.Interruption, gkeEnableInterruption, env.WithDefaultBool(gkeEnableInterruption, true), "Enable interruption handling.")
+	fs.DurationVar(&o.UnavailableOfferingsTTL, unavailableOfferingsTTLFlagName, env.WithDefaultDuration(unavailableOfferingsTTLEnvVarName, unavailableofferings.DefaultTTL), "How long an offering (instance type, zone, and capacity type) which failed with an insufficient capacity error stays unavailable for launch.")
 }
 
 func (o *Options) Parse(fs *coreoptions.FlagSet, args ...string) error {

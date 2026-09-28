@@ -122,6 +122,10 @@ spec:
             - name: VM_MEMORY_OVERHEAD_PERCENT
               value: "{{ . }}"
             {{- end }}
+            {{- with .Values.controller.settings.unavailableOfferingsTTL }}
+            - name: UNAVAILABLE_OFFERINGS_TTL
+              value: "{{ . }}"
+            {{- end }}
             {{- with .Values.controller.settings.defaultNodePoolTemplateName }}
             - name: DEFAULT_NODEPOOL_TEMPLATE_NAME
               value: "{{ . }}"

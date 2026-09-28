@@ -27,8 +27,9 @@ import (
 )
 
 const (
-	// DefaultTTL is the time before offerings that were marked as unavailable
-	// are removed from the cache and become available for launch again.
+	// DefaultTTL is the default time before offerings that were marked as
+	// unavailable are removed from the cache and become available for launch
+	// again.
 	DefaultTTL = 30 * time.Minute
 	// CleanupInterval triggers background cache cleanup. Expired entries are treated
 	// as missing on lookup, so this only controls physical eviction and SeqNum bumps.
@@ -41,19 +42,29 @@ const (
 type UnavailableOfferings struct {
 	// key: <capacityType>:<instanceType>:<zone>, value: struct{}{}
 	cache  *cache.Cache
+	ttl    time.Duration
 	seqNum uint64
 }
 
-func NewUnavailableOfferingsWithCache(c *cache.Cache) *UnavailableOfferings {
-	uo := &UnavailableOfferings{cache: c}
+// NewUnavailableOfferingsWithCache returns an UnavailableOfferings backed by c
+// which keeps offerings marked as unavailable for ttl.
+func NewUnavailableOfferingsWithCache(c *cache.Cache, ttl time.Duration) *UnavailableOfferings {
+	uo := &UnavailableOfferings{cache: c, ttl: ttl}
 	uo.cache.OnEvicted(func(_ string, _ any) {
 		atomic.AddUint64(&uo.seqNum, 1)
 	})
 	return uo
 }
 
-func NewUnavailableOfferings() *UnavailableOfferings {
-	return NewUnavailableOfferingsWithCache(cache.New(DefaultTTL, CleanupInterval))
+// NewUnavailableOfferings returns an UnavailableOfferings which keeps offerings
+// marked as unavailable for ttl.
+func NewUnavailableOfferings(ttl time.Duration) *UnavailableOfferings {
+	return NewUnavailableOfferingsWithCache(cache.New(ttl, CleanupInterval), ttl)
+}
+
+// TTL returns the time that offerings marked as unavailable stay in the cache.
+func (u *UnavailableOfferings) TTL() time.Duration {
+	return u.ttl
 }
 
 // SeqNum returns the current unavailable-offerings cache revision.
@@ -84,7 +95,7 @@ func (u *UnavailableOfferings) MarkUnavailableWithTTL(ctx context.Context, unava
 
 // MarkUnavailable communicates recently observed temporary capacity shortages in the provided offerings
 func (u *UnavailableOfferings) MarkUnavailable(ctx context.Context, unavailableReason, instanceType, zone, capacityType string) {
-	u.MarkUnavailableWithTTL(ctx, unavailableReason, instanceType, zone, capacityType, DefaultTTL)
+	u.MarkUnavailableWithTTL(ctx, unavailableReason, instanceType, zone, capacityType, u.ttl)
 }
 
 func (u *UnavailableOfferings) Flush() {
