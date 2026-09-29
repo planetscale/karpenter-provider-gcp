@@ -27,7 +27,7 @@ import (
 func TestUnavailableOfferings(t *testing.T) {
 	// create a new cache with a short TTL
 	c := cache.New(time.Second, time.Second)
-	u := NewUnavailableOfferingsWithCache(c, time.Second)
+	u := NewUnavailableOfferingsWithCache(c)
 
 	// test that an offering is not marked as unavailable initially
 	if u.IsUnavailable("NV16as_v4", "westus", "spot") {
@@ -51,27 +51,8 @@ func TestUnavailableOfferings(t *testing.T) {
 	}
 }
 
-func TestUnavailableOfferingsWithTTL(t *testing.T) {
-	u := NewUnavailableOfferings(time.Second)
-	if got := u.TTL(); got != time.Second {
-		t.Fatalf("expected TTL %s, got %s", time.Second, got)
-	}
-
-	// MarkUnavailable uses the configured TTL.
-	u.MarkUnavailable(context.TODO(), "test reason", "NV16as_v4", "westus", "spot")
-	if !u.IsUnavailable("NV16as_v4", "westus", "spot") {
-		t.Error("Offering should be marked as unavailable after being marked as such")
-	}
-
-	time.Sleep(time.Second)
-
-	if u.IsUnavailable("NV16as_v4", "westus", "spot") {
-		t.Error("Offering should not be marked as unavailable after the configured TTL")
-	}
-}
-
 func TestUnavailableOfferingsSeqNum(t *testing.T) {
-	u := NewUnavailableOfferingsWithCache(cache.New(time.Second, time.Second), time.Second)
+	u := NewUnavailableOfferingsWithCache(cache.New(time.Second, time.Second))
 	if got := u.SeqNum(); got != 0 {
 		t.Fatalf("expected initial seq num 0, got %d", got)
 	}

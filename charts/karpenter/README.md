@@ -124,7 +124,6 @@ serviceMonitor:
 | controller.settings.nodeLocation | string | `""` | The exact GCP cluster location for GKE API calls (e.g., us-central1-a for zonal, us-central1 for regional). If not set, defaults to 'clusterLocation' for backward compatibility. |
 | controller.settings.preferencePolicy | string | `"Respect"` | preferencePolicy controls how Karpenter handles soft scheduling preferences. `Respect` is the default; `Ignore` disregards preferred node/pod affinity and anti-affinity plus ScheduleAnyway topology spread constraints. |
 | controller.settings.projectID | string | `""` | The GCP project ID. |
-| controller.settings.unavailableOfferingsTTL | string | `"30m"` | How long an offering (instance type, zone, and capacity type) which failed with an insufficient capacity error stays unavailable for launch. |
 | controller.settings.vmMemoryOverheadPercent | float | `0.065` | The VM memory overhead as a percent that will be subtracted from the total memory for all instance types. The value of `0.075` equals to 7.5%. |
 | controller.strategy.rollingUpdate.maxUnavailable | int | `1` |  |
 | controller.terminationGracePeriodSeconds | int | `30` |  |

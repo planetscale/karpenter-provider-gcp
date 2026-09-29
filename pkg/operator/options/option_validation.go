@@ -23,7 +23,6 @@ import (
 func (o *Options) Validate() error {
 	return multierr.Combine(
 		o.validateRequiredFields(),
-		o.validateUnavailableOfferingsTTL(),
 	)
 }
 
@@ -36,13 +35,6 @@ func (o *Options) validateRequiredFields() error {
 	}
 	if o.ClusterLocation == "" {
 		return fmt.Errorf("missing required flag %s or env var %s", clusterLocationFlagName, clusterLocationEnvVarName)
-	}
-	return nil
-}
-
-func (o *Options) validateUnavailableOfferingsTTL() error {
-	if o.UnavailableOfferingsTTL <= 0 {
-		return fmt.Errorf("%s must be positive, got %s", unavailableOfferingsTTLFlagName, o.UnavailableOfferingsTTL)
 	}
 	return nil
 }

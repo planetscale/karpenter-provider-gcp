@@ -358,11 +358,6 @@
               "description": "Fraction of VM memory reserved as overhead (e.g. 0.065 = 6.5%).",
               "default": 0.065
             },
-            "unavailableOfferingsTTL": {
-              "type": "string",
-              "description": "How long an offering which failed with an insufficient capacity error stays unavailable for launch (e.g. 30m).",
-              "default": "30m"
-            },
             "batchMaxDuration": {
               "type": "string",
               "description": "Maximum duration of a provisioning batch window (e.g. 10s).",
