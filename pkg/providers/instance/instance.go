@@ -181,7 +181,7 @@ func (p *DefaultProvider) handleZoneOperationError(ctx context.Context, op *comp
 		if reason == "" {
 			reason = capacityError.Code
 		}
-		ttl := insufficientCapacityBackoffTTL(capacityError.Code, p.unavailableOfferings.TTL())
+		ttl := insufficientCapacityBackoffTTL(capacityError.Code)
 		p.unavailableOfferings.MarkUnavailableWithTTL(ctx, reason, instanceType, zone, capacityType, ttl)
 		return cloudprovider.NewInsufficientCapacityError(fmt.Errorf("zone %s insufficient capacity: %s", zone, reason))
 	}
@@ -226,14 +226,12 @@ func extractInsertInsufficientCapacityReason(err error) (string, string, bool) {
 	return "", "", false
 }
 
-// insufficientCapacityBackoffTTL returns how long to mark an offering as
-// unavailable for reasonCode, or def for most capacity errors.
-func insufficientCapacityBackoffTTL(reasonCode string, def time.Duration) time.Duration {
+func insufficientCapacityBackoffTTL(reasonCode string) time.Duration {
 	if reasonCode == "IP_SPACE_EXHAUSTED_WITH_DETAILS" || reasonCode == "IP_SPACE_EXHAUSTED" {
 		return ipSpaceInsufficientCapacityTTL
 	}
 
-	return def
+	return unavailableofferings.DefaultTTL
 }
 
 func (p *DefaultProvider) isInstanceExists(ctx context.Context, zone, instanceName string) (*compute.Instance, bool, error) {
@@ -421,7 +419,7 @@ func (p *DefaultProvider) getOrCreateInstance(ctx context.Context, nodeClaim *ka
 			if reason == "" {
 				reason = "insufficient capacity"
 			}
-			ttl := insufficientCapacityBackoffTTL(reasonCode, p.unavailableOfferings.TTL())
+			ttl := insufficientCapacityBackoffTTL(reasonCode)
 			p.unavailableOfferings.MarkUnavailableWithTTL(ctx, reason, instanceType.Name, zone, capacityType, ttl)
 			err = cloudprovider.NewInsufficientCapacityError(fmt.Errorf("zone %s insufficient capacity: %s", zone, reason))
 

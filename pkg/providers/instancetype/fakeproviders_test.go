@@ -77,7 +77,7 @@ func newTestProvider() *DefaultProvider {
 		instanceTypesOfferings: map[string]sets.Set[string]{
 			"n2-standard-4": sets.New("us-central1-a"),
 		},
-		unavailableOfferings:     unavailableofferings.NewUnavailableOfferings(unavailableofferings.DefaultTTL),
+		unavailableOfferings:     unavailableofferings.NewUnavailableOfferings(),
 		staticInstanceTypesCache: cache.New(StaticInstanceTypesCacheTTL, staticInstanceTypesCacheCleanup),
 		cm:                       pretty.NewChangeMonitor(),
 	}
