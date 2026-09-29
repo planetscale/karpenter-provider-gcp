@@ -50,6 +50,7 @@ import (
 	"sigs.k8s.io/karpenter/pkg/scheduling"
 
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/apis/v1alpha1"
+	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/metadata"
 	gcpoptions "github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/operator/options"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/gke"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/instance"
@@ -113,9 +114,11 @@ type reproGKE struct{}
 func (reproGKE) ResolveClusterZones(context.Context) ([]string, error) {
 	return []string{"us-central1-a"}, nil
 }
+
 func (reproGKE) GetClusterConfig(context.Context) (*container.Cluster, error) {
 	return &container.Cluster{Id: "deadbeef", NetworkConfig: &container.NetworkConfig{Network: "projects/test/global/networks/default", Subnetwork: "projects/test/regions/us-central1/subnetworks/default"}}, nil
 }
+
 func (reproGKE) GetServerConfig(context.Context) (*container.ServerConfig, error) {
 	return &container.ServerConfig{}, nil
 }
@@ -125,17 +128,27 @@ type reproTemplate struct{}
 func (reproTemplate) Sync(context.Context) error               { return nil }
 func (reproTemplate) EnsureFallbackPool(context.Context) error { return nil }
 func (reproTemplate) GetSourceTemplateMetadata(context.Context) (*compute.Metadata, error) {
-	return &compute.Metadata{}, nil
+	const kubeEnv = "CA_CERT: test-ca\n" +
+		"KUBE_MANIFESTS_TAR_URL: https://storage.googleapis.com/gke-release/kubernetes/release/v1.30.1-gke.123/kubernetes-manifests.tar.gz\n" +
+		"KUBERNETES_MASTER_NAME: 10.0.0.2\n" +
+		"SERVER_BINARY_TAR_HASH: amd64-sha512\n" +
+		"SERVER_BINARY_TAR_URL: https://storage.googleapis.com/gke-release/kubernetes/release/v1.30.1-gke.123/kubernetes-server-linux-amd64.tar.gz\n"
+	return &compute.Metadata{Items: []*compute.MetadataItems{{
+		Key:   metadata.KubeEnvKey,
+		Value: lo.ToPtr(kubeEnv),
+	}}}, nil
 }
 
 type reproVersion struct{}
 
 func (reproVersion) Get(context.Context) (string, error) { return "1.35.0", nil }
 
-var _ instancetype.Provider = reproTypes{}
-var _ gke.Provider = reproGKE{}
-var _ nodepooltemplate.Provider = reproTemplate{}
-var _ version.Provider = reproVersion{}
+var (
+	_ instancetype.Provider     = reproTypes{}
+	_ gke.Provider              = reproGKE{}
+	_ nodepooltemplate.Provider = reproTemplate{}
+	_ version.Provider          = reproVersion{}
+)
 
 func TestExactCountCreateMatrix(t *testing.T) {
 	fullCatalog := append([]int{0}, localssd.AllowedLocalSSDCounts("n2d-standard-4", 4)...)
@@ -531,6 +544,7 @@ func reproWriteJSON(w http.ResponseWriter, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(value)
 }
+
 func reproPod(name string, gib int64, selector map[string]string) *corev1.Pod {
 	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: types.UID(name)}, Status: corev1.PodStatus{Phase: corev1.PodPending}, Spec: corev1.PodSpec{NodeSelector: selector, Containers: []corev1.Container{{Name: "c", Image: "x", Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceEphemeralStorage: *resource.NewQuantity(gib*1024*1024*1024, resource.BinarySI)}}}}}}
 }
