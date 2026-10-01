@@ -20,8 +20,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -46,6 +48,7 @@ import (
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/gke"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/offerings/unavailableofferings"
 	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/providers/pricing"
+	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/utils/localssd"
 )
 
 const (
@@ -67,6 +70,8 @@ type Provider interface {
 	List(context.Context, *v1alpha1.GCENodeClass) ([]*cloudprovider.InstanceType, error)
 	UpdateInstanceTypes(ctx context.Context) error
 	UpdateInstanceTypeOfferings(ctx context.Context) error
+	// GetMachineType returns a cached GCE machine type, if present.
+	GetMachineType(name string) *computepb.MachineType
 }
 
 type DefaultProvider struct {
@@ -79,7 +84,7 @@ type DefaultProvider struct {
 	// Reference: https://cloud.google.com/compute/docs/instances/provisioning-models
 
 	muInstanceTypesInfo    sync.RWMutex
-	instanceTypesInfo      []*computepb.MachineType
+	instanceTypesByName    map[string]*computepb.MachineType
 	instanceTypesOfferings map[string]sets.Set[string]
 	instanceTypesSeqNum    uint64
 	cm                     *pretty.ChangeMonitor
@@ -93,6 +98,7 @@ type DefaultProvider struct {
 type staticInstanceType struct {
 	machineType  *computepb.MachineType
 	instanceType *cloudprovider.InstanceType
+	ssdCount     int
 }
 
 func NewDefaultProvider(ctx context.Context, authOptions *auth.Credential, pricingProvider pricing.Provider,
@@ -119,8 +125,14 @@ func (p *DefaultProvider) LivenessProbe(req *http.Request) error {
 	return p.pricingProvider.LivenessProbe(req)
 }
 
+func (p *DefaultProvider) GetMachineType(name string) *computepb.MachineType {
+	p.muInstanceTypesInfo.RLock()
+	defer p.muInstanceTypesInfo.RUnlock()
+	return p.instanceTypesByName[name]
+}
+
 func (p *DefaultProvider) validateState() error {
-	if len(p.instanceTypesInfo) == 0 {
+	if len(p.instanceTypesByName) == 0 {
 		return fmt.Errorf("no instance types found")
 	}
 
@@ -151,7 +163,7 @@ func (p *DefaultProvider) List(ctx context.Context, nodeClass *v1alpha1.GCENodeC
 func (p *DefaultProvider) getStaticInstanceTypes(ctx context.Context, nodeClass *v1alpha1.GCENodeClass) ([]staticInstanceType, error) {
 	kcHash, _ := hashstructure.Hash(nodeClass.Spec.KubeletConfiguration, hashstructure.FormatV2, &hashstructure.HashOptions{SlicesAsSets: true})
 	disksHash, _ := hashstructure.Hash(nodeClass.Spec.Disks, hashstructure.FormatV2, &hashstructure.HashOptions{SlicesAsSets: true})
-	key := fmt.Sprintf("%d-%d-%d", atomic.LoadUint64(&p.instanceTypesSeqNum), kcHash, disksHash)
+	key := fmt.Sprintf("%d-%d-%d-%s", atomic.LoadUint64(&p.instanceTypesSeqNum), kcHash, disksHash, nodeClass.Spec.LocalSsdMode)
 
 	if item, ok := p.staticInstanceTypesCache.Get(key); ok {
 		return item.([]staticInstanceType), nil
@@ -164,17 +176,20 @@ func (p *DefaultProvider) getStaticInstanceTypes(ctx context.Context, nodeClass 
 	}
 
 	instanceTypes := []staticInstanceType{}
-	for _, mt := range p.instanceTypesInfo {
+	for _, name := range slices.Sorted(maps.Keys(p.instanceTypesByName)) {
+		mt := p.instanceTypesByName[name]
 		instanceType := lo.FromPtr(mt.Name)
 		if instanceType == "" || mt.MemoryMb == nil || mt.GuestCpus == nil {
 			continue
 		}
 
-		it := NewStaticInstanceType(ctx, mt, nodeClass)
-		if it == nil {
-			continue
+		for _, ssdCount := range ssdCountVariants(mt) {
+			it := NewStaticInstanceType(ctx, mt, nodeClass, ssdCount)
+			if it == nil {
+				continue
+			}
+			instanceTypes = append(instanceTypes, staticInstanceType{machineType: mt, instanceType: it, ssdCount: ssdCount})
 		}
-		instanceTypes = append(instanceTypes, staticInstanceType{machineType: mt, instanceType: it})
 	}
 	p.staticInstanceTypesCache.SetDefault(key, instanceTypes)
 	return instanceTypes, nil
@@ -192,10 +207,26 @@ func (p *DefaultProvider) injectOfferings(ctx context.Context, staticInstanceTyp
 
 		it := cached.instanceType.DeepCopy()
 		it.Offerings = offerings
-		it.Requirements = computeRequirements(cached.machineType, offerings, p.authOptions.Region)
+		it.Requirements = computeRequirements(cached.machineType, offerings, p.authOptions.Region, cached.ssdCount)
 		instanceTypes = append(instanceTypes, it)
 	}
 	return instanceTypes
+}
+
+func ssdCountVariants(mt *computepb.MachineType) []int {
+	name := lo.FromPtr(mt.Name)
+	if localssd.FamilySupportsConfigurableLocalSSDs(name) {
+		allowed := localssd.AllowedLocalSSDCounts(name, mt.GetGuestCpus())
+		return append([]int{0}, allowed...)
+	}
+	// Skip bundled-SSD types with no partition count rather than advertising them without SSDs.
+	if bls := mt.GetBundledLocalSsds(); bls != nil {
+		if bls.PartitionCount != nil && *bls.PartitionCount > 0 {
+			return []int{int(*bls.PartitionCount)}
+		}
+		return nil
+	}
+	return []int{0}
 }
 
 // buildZoneData checks zonal availability from cached offerings while keeping spot
@@ -298,13 +329,24 @@ func (p *DefaultProvider) UpdateInstanceTypes(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("getting instance types: %w", err)
 	}
-	if p.cm.HasChanged("instance-types", types) {
+	byName := indexInstanceTypesByName(types)
+	if p.cm.HasChanged("instance-types", byName) {
 		atomic.AddUint64(&p.instanceTypesSeqNum, 1)
 		p.staticInstanceTypesCache.Flush()
 	}
-	p.instanceTypesInfo = types
+	p.instanceTypesByName = byName
 
 	return nil
+}
+
+func indexInstanceTypesByName(types []*computepb.MachineType) map[string]*computepb.MachineType {
+	byName := make(map[string]*computepb.MachineType, len(types))
+	for _, mt := range types {
+		if name := lo.FromPtr(mt.Name); name != "" {
+			byName[name] = mt
+		}
+	}
+	return byName
 }
 
 func (p *DefaultProvider) getInstanceTypes(ctx context.Context) ([]*computepb.MachineType, error) {
