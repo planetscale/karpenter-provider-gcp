@@ -17,6 +17,7 @@ limitations under the License.
 package localssdextended
 
 import (
+	"os"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -31,6 +32,40 @@ var (
 	env *environment.Environment
 	_   = BeforeEach(func() { env = environment.Current() })
 )
+
+var _ = Describe("Z4D local SSD", Label("suite:local-ssd-extended"), func() {
+	It("uses bundled SSD for a 1000Gi ephemeral-storage request", func(ctx SpecContext) {
+		if os.Getenv("E2E_Z4D_TESTS") != "true" {
+			Skip("set E2E_Z4D_TESTS=true with Z4D quota and a supported GKE cluster")
+		}
+		env.RunProvisioningTest(ctx, environment.TestCase{
+			CapacityType:         karpv1.CapacityTypeOnDemand,
+			Arch:                 karpv1.ArchitectureAmd64,
+			Families:             []string{"z4d"},
+			InstanceTypes:        []string{"z4d-highmem-8-highlssd"},
+			BootDiskCategory:     "hyperdisk-balanced",
+			LocalSSDMode:         gcpv1alpha1.LocalSSDModeEphemeral,
+			PodEphemeralStorage:  "1000Gi",
+			ExpectedScratchDisks: 1,
+		})
+	}, SpecTimeout(15*time.Minute))
+
+	It("provisions the bundled SSD with count one in RawBlock mode", func(ctx SpecContext) {
+		if os.Getenv("E2E_Z4D_TESTS") != "true" {
+			Skip("set E2E_Z4D_TESTS=true with Z4D quota and a supported GKE cluster")
+		}
+		env.RunProvisioningTest(ctx, environment.TestCase{
+			CapacityType:         karpv1.CapacityTypeOnDemand,
+			Arch:                 karpv1.ArchitectureAmd64,
+			Families:             []string{"z4d"},
+			InstanceTypes:        []string{"z4d-highmem-8-highlssd"},
+			BootDiskCategory:     "hyperdisk-balanced",
+			LocalSSDMode:         gcpv1alpha1.LocalSSDModeRawBlock,
+			PodLocalSSDCount:     "1",
+			ExpectedScratchDisks: 1,
+		})
+	}, SpecTimeout(15*time.Minute))
+})
 
 var _ = DescribeTable("Local SSD extended", Label("suite:local-ssd-extended"),
 	func(ctx SpecContext, tc environment.TestCase) {
