@@ -325,6 +325,17 @@ func TestCalculateDiskConfiguration(t *testing.T) {
 			expectedSSDCount: 4,
 		},
 		{
+			name:      "z4d bundled partition is 3500 GiB",
+			nodeClass: &v1alpha1.GCENodeClass{},
+			mt: &computepb.MachineType{
+				Name:             lo.ToPtr("z4d-highmem-8-highlssd"),
+				BundledLocalSsds: &computepb.BundledLocalSsds{PartitionCount: lo.ToPtr[int32](1)},
+			},
+			expectedBootGiB:  100,
+			expectedSSDGiB:   3500,
+			expectedSSDCount: 1,
+		},
+		{
 			name:      "BundledLocalSsds PartitionCount=0 treated as no SSDs",
 			nodeClass: &v1alpha1.GCENodeClass{},
 			mt: &computepb.MachineType{
@@ -501,6 +512,28 @@ func TestNewInstanceTypeModeAware(t *testing.T) {
 			wantReservedGiB: 100,
 		},
 		{
+			name: "z4d RawBlock excludes bundled SSD from ephemeral capacity",
+			mt: &computepb.MachineType{
+				Name: lo.ToPtr("z4d-highmem-8-highlssd"), GuestCpus: lo.ToPtr[int32](8), MemoryMb: lo.ToPtr[int32](64512),
+				BundledLocalSsds: &computepb.BundledLocalSsds{PartitionCount: lo.ToPtr[int32](1)},
+			},
+			mode:            v1alpha1.LocalSSDModeRawBlock,
+			count:           1,
+			wantCapGiB:      bootModeCapGiB,
+			wantReservedGiB: bootModeReservedGiB,
+		},
+		{
+			name: "z4d Ephemeral uses 3500 GiB SSD capacity",
+			mt: &computepb.MachineType{
+				Name: lo.ToPtr("z4d-highmem-8-highlssd"), GuestCpus: lo.ToPtr[int32](8), MemoryMb: lo.ToPtr[int32](64512),
+				BundledLocalSsds: &computepb.BundledLocalSsds{PartitionCount: lo.ToPtr[int32](1)},
+			},
+			mode:            v1alpha1.LocalSSDModeEphemeral,
+			count:           1,
+			wantCapGiB:      3500,
+			wantReservedGiB: 50,
+		},
+		{
 			name: "z3-highmem-88 legacy SKU Ephemeral (12 partitions × 3000 GiB)",
 			mt: &computepb.MachineType{
 				Name: lo.ToPtr("z3-highmem-88"), GuestCpus: lo.ToPtr[int32](88), MemoryMb: lo.ToPtr[int32](720896),
@@ -556,6 +589,132 @@ func TestComputeRequirementsIncludesDiskTypeCompatibility(t *testing.T) {
 
 	assert.NoError(t, requirements.Intersects(supportedVolumeRequirement))
 	assert.Error(t, requirements.Intersects(unsupportedVolumeRequirement))
+}
+
+func TestComputeRequirementsRejectsPersistentDiskOnHyperdiskOnlyFamilies(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"c4a-standard-4", "n4-standard-4"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			requirements := computeRequirements(&computepb.MachineType{
+				Name:      lo.ToPtr(name),
+				GuestCpus: lo.ToPtr[int32](4),
+				MemoryMb:  lo.ToPtr[int32](16384),
+			}, nil, "us-central1", 0)
+
+			for _, diskType := range []string{"pd-balanced", "pd-ssd"} {
+				label := "disk-type.gke.io/" + diskType
+				assert.Equal(t, corev1.NodeSelectorOpDoesNotExist, requirements.Get(label).Operator())
+				assert.Error(t, requirements.Intersects(scheduling.NewRequirements(
+					scheduling.NewRequirement(label, corev1.NodeSelectorOpIn, "true"),
+				)))
+			}
+			assert.NoError(t, requirements.Intersects(scheduling.NewRequirements(
+				scheduling.NewRequirement("disk-type.gke.io/hyperdisk-balanced", corev1.NodeSelectorOpIn, "true"),
+			)))
+		})
+	}
+}
+
+func TestZ4DDiskTypeRequirements(t *testing.T) {
+	t.Parallel()
+
+	requirements := computeRequirements(&computepb.MachineType{
+		Name:             lo.ToPtr("z4d-highmem-8-highlssd"),
+		GuestCpus:        lo.ToPtr[int32](8),
+		MemoryMb:         lo.ToPtr[int32](64512),
+		BundledLocalSsds: &computepb.BundledLocalSsds{PartitionCount: lo.ToPtr[int32](1)},
+	}, nil, "us-central1", 1)
+
+	require.Equal(t, []string{"1"}, requirements.Get(v1alpha1.LabelInstanceLocalSsdCount).Values())
+	for _, diskType := range []string{"hyperdisk-balanced", "hyperdisk-balanced-high-availability", "hyperdisk-extreme", "hyperdisk-throughput", "hyperdisk-ml"} {
+		volumeRequirement := scheduling.NewRequirements(
+			scheduling.NewRequirement("disk-type.gke.io/"+diskType, corev1.NodeSelectorOpIn, "true"),
+		)
+		require.NoError(t, requirements.Intersects(volumeRequirement), diskType)
+	}
+	for _, diskType := range []string{"pd-balanced", "pd-ssd", "pd-standard", "pd-extreme"} {
+		volumeRequirement := scheduling.NewRequirements(
+			scheduling.NewRequirement("disk-type.gke.io/"+diskType, corev1.NodeSelectorOpIn, "true"),
+		)
+		require.Error(t, requirements.Intersects(volumeRequirement), diskType)
+	}
+}
+
+func TestBareMetalInstanceRequirements(t *testing.T) {
+	ctx := options.ToContext(context.Background(), &options.Options{VMMemoryOverheadPercent: 0.07})
+	tests := []struct {
+		name      string
+		bareMetal string
+	}{
+		{name: "c4a-highmem-96-metal", bareMetal: "true"},
+		{name: "c4a-highmem-96", bareMetal: "false"},
+		{name: "c4-standard-288-metal", bareMetal: "true"},
+		{name: "c4-standard-288", bareMetal: "false"},
+		{name: "c4-standard-288-lssd-metal", bareMetal: "true"},
+		{name: "c4-standard-288-lssd", bareMetal: "false"},
+		{name: "z3-highmem-192-highlssd-metal", bareMetal: "true"},
+		{name: "n2-custom-4-16384", bareMetal: "false"},
+		{name: "a4x-maxgpu-4g-metal", bareMetal: "true"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mt := &computepb.MachineType{
+				Name:      lo.ToPtr(tt.name),
+				GuestCpus: lo.ToPtr[int32](96),
+				MemoryMb:  lo.ToPtr[int32](768 * 1024),
+			}
+			it := NewInstanceType(ctx, mt, &v1alpha1.GCENodeClass{}, "us-central1", testOfferings(), 0)
+			require.NotNil(t, it)
+			require.Equal(t, []string{tt.bareMetal}, it.Requirements.Get(v1alpha1.LabelInstanceBareMetal).Values())
+			require.Equal(t, []string{"96"}, it.Requirements.Get(v1alpha1.LabelInstanceCPU).Values(),
+				"metal selection must not change the CPU selector")
+			require.Equal(t, []string{strings.Split(tt.name, "-")[0]}, it.Requirements.Get(v1alpha1.LabelInstanceFamily).Values())
+			require.NoError(t, it.Requirements.Compatible(scheduling.NewRequirements()),
+				"pools without a bare-metal requirement must retain both VMs and metal")
+			for _, value := range []string{"true", "false"} {
+				req := scheduling.NewRequirements(scheduling.NewRequirement(v1alpha1.LabelInstanceBareMetal, corev1.NodeSelectorOpIn, value))
+				require.Equal(t, tt.bareMetal == value, it.Requirements.IsCompatible(req))
+			}
+			excludeMetal := scheduling.NewRequirements(scheduling.NewRequirement(v1alpha1.LabelInstanceBareMetal, corev1.NodeSelectorOpNotIn, "true"))
+			require.Equal(t, tt.bareMetal == "false", it.Requirements.IsCompatible(excludeMetal))
+		})
+	}
+}
+
+func TestBareMetalRequirementLegacyCompatibility(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels map[string]string
+		want   []bool
+	}{
+		{name: "legacy node without label", labels: map[string]string{}, want: []bool{false, false, true}},
+		{name: "virtual machine", labels: map[string]string{v1alpha1.LabelInstanceBareMetal: "false"}, want: []bool{true, false, true}},
+		{name: "bare metal", labels: map[string]string{v1alpha1.LabelInstanceBareMetal: "true"}, want: []bool{false, true, false}},
+	}
+	selectors := []struct {
+		name     string
+		operator corev1.NodeSelectorOperator
+		value    string
+	}{
+		{name: "require VM", operator: corev1.NodeSelectorOpIn, value: "false"},
+		{name: "require metal", operator: corev1.NodeSelectorOpIn, value: "true"},
+		{name: "exclude labeled metal", operator: corev1.NodeSelectorOpNotIn, value: "true"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			labels := scheduling.NewLabelRequirements(tt.labels)
+			for i, selector := range selectors {
+				t.Run(selector.name, func(t *testing.T) {
+					req := scheduling.NewRequirements(scheduling.NewRequirement(v1alpha1.LabelInstanceBareMetal, selector.operator, selector.value))
+					require.Equal(t, tt.want[i], labels.IsCompatible(req),
+						"drift compares persisted labels, so positive selectors reject unlabeled legacy VMs too")
+				})
+			}
+		})
+	}
 }
 
 func TestComputeRequirements(t *testing.T) {
@@ -979,6 +1138,7 @@ func TestComputeRequirements(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			tt.expected.Add(scheduling.NewRequirement(v1alpha1.LabelInstanceBareMetal, corev1.NodeSelectorOpIn, "false"))
 			got := computeRequirements(tt.mt, tt.offerings, tt.region, tt.ssdCount)
 
 			// Validate keys present in got

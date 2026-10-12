@@ -79,18 +79,23 @@ const (
 
 var (
 	// Access NodeClaims through ListNodeClaims rather than this GVR directly.
-	nodeClaimGVR    = schema.GroupVersionResource{Group: "karpenter.sh", Version: "v1", Resource: "nodeclaims"}
-	nodePoolGVR     = schema.GroupVersionResource{Group: "karpenter.sh", Version: "v1", Resource: "nodepools"}
-	gceNodeClassGVR = schema.GroupVersionResource{Group: "karpenter.k8s.gcp", Version: "v1alpha1", Resource: "gcenodeclasses"}
-	nodeOverlayGVR  = schema.GroupVersionResource{Group: "karpenter.sh", Version: "v1alpha1", Resource: "nodeoverlays"}
+	nodeClaimGVR            = schema.GroupVersionResource{Group: "karpenter.sh", Version: "v1", Resource: "nodeclaims"}
+	nodePoolGVR             = schema.GroupVersionResource{Group: "karpenter.sh", Version: "v1", Resource: "nodepools"}
+	gceNodeClassGVR         = schema.GroupVersionResource{Group: "karpenter.k8s.gcp", Version: "v1alpha1", Resource: "gcenodeclasses"}
+	gceCustomMachineTypeGVR = schema.GroupVersionResource{Group: "karpenter.k8s.gcp", Version: "v1alpha1", Resource: "gcecustommachinetypes"}
+	nodeOverlayGVR          = schema.GroupVersionResource{Group: "karpenter.sh", Version: "v1alpha1", Resource: "nodeoverlays"}
 )
 
 // Environment holds shared state for a test suite run.
 type Environment struct {
-	ProjectID       string
-	ClusterName     string
-	ClusterLocation string // region or zone, e.g. "us-central1" or "us-central1-a"
-	PodsRangeName   string
+	ProjectID          string
+	ClusterName        string
+	ClusterLocation    string // region or zone, e.g. "us-central1" or "us-central1-a"
+	PodsRangeName      string
+	SmallPodsRangeName string
+	LargePodsRangeName string
+	// ResourceManagerTagKey is the short name of the project-scoped tag key created by e2e-setup.
+	ResourceManagerTagKey string
 
 	KubeClient    kubernetes.Interface
 	DynamicClient dynamic.Interface
@@ -141,18 +146,21 @@ func NewEnvironment() *Environment {
 	Expect(err).NotTo(HaveOccurred(), "creating GCP compute service client")
 
 	env := &Environment{
-		ProjectID:         mustEnv("PROJECT_ID"),
-		ClusterName:       mustEnv("CLUSTER_NAME"),
-		ClusterLocation:   mustEnv("CLUSTER_LOCATION"),
-		PodsRangeName:     mustEnv("PODS_RANGE_NAME"),
-		KubeClient:        kubeClient,
-		DynamicClient:     dynamicClient,
-		MetricsClient:     metricsClient,
-		containerSvc:      containerSvc,
-		computeSvc:        computeSvc,
-		ownedNodePools:    make(map[string]struct{}),
-		ownedNodeClasses:  make(map[string]struct{}),
-		ownedNodeOverlays: make(map[string]struct{}),
+		ProjectID:             mustEnv("PROJECT_ID"),
+		ClusterName:           mustEnv("CLUSTER_NAME"),
+		ClusterLocation:       mustEnv("CLUSTER_LOCATION"),
+		PodsRangeName:         mustEnv("PODS_RANGE_NAME"),
+		SmallPodsRangeName:    os.Getenv("SMALL_PODS_RANGE_NAME"),
+		LargePodsRangeName:    os.Getenv("LARGE_PODS_RANGE_NAME"),
+		ResourceManagerTagKey: os.Getenv("RESOURCE_MANAGER_TAG_KEY"),
+		KubeClient:            kubeClient,
+		DynamicClient:         dynamicClient,
+		MetricsClient:         metricsClient,
+		containerSvc:          containerSvc,
+		computeSvc:            computeSvc,
+		ownedNodePools:        make(map[string]struct{}),
+		ownedNodeClasses:      make(map[string]struct{}),
+		ownedNodeOverlays:     make(map[string]struct{}),
 	}
 
 	// Fast-fail: verify the cluster exists at the configured location before

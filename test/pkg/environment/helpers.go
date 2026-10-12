@@ -127,6 +127,15 @@ func (e *Environment) CreateNodeClassWithDiskCategory(ctx context.Context, name,
 }
 
 func (e *Environment) createNodeClass(ctx context.Context, name, imageFamily, diskCategory string) {
+	e.createNodeClassWithPodRanges(ctx, name, imageFamily, diskCategory, e.PodsRangeName, nil)
+}
+
+// CreateNodeClassWithPodRanges omits overrides when subnetRangeName and names are empty.
+func (e *Environment) CreateNodeClassWithPodRanges(ctx context.Context, name, subnetRangeName string, names []string) {
+	e.createNodeClassWithPodRanges(ctx, name, gcpv1alpha1.ImageFamilyContainerOptimizedOS, "", subnetRangeName, names)
+}
+
+func (e *Environment) createNodeClassWithPodRanges(ctx context.Context, name, imageFamily, diskCategory, subnetRangeName string, names []string) {
 	diskGiB := int64(DefaultE2EDiskGiB)
 	if imageFamily == gcpv1alpha1.ImageFamilyUbuntu {
 		diskGiB = 50 // ubuntu-gke images require more space than COS
@@ -144,10 +153,15 @@ func (e *Environment) createNodeClass(ctx context.Context, name, imageFamily, di
 			"imageSelectorTerms": []any{
 				map[string]any{"alias": imageFamily + "@latest"},
 			},
-			"disks":           []any{disk},
-			"subnetRangeName": e.PodsRangeName,
+			"disks": []any{disk},
 		},
 	}}
+	if subnetRangeName != "" {
+		Expect(unstructured.SetNestedField(obj.Object, subnetRangeName, "spec", "subnetRangeName")).To(Succeed())
+	}
+	if len(names) > 0 {
+		Expect(unstructured.SetNestedStringSlice(obj.Object, names, "spec", "subnetRangeNames")).To(Succeed())
+	}
 	_, err := e.DynamicClient.Resource(gceNodeClassGVR).Create(ctx, obj, metav1.CreateOptions{})
 	Expect(err).NotTo(HaveOccurred(), "creating GCENodeClass %s", name)
 	e.trackNodeClass(name)
@@ -479,33 +493,57 @@ func (e *Environment) GetGCEInstance(ctx context.Context, providerID string) (*c
 	return e.computeSvc.Instances.Get(project, zone, name).Context(ctx).Do()
 }
 
-// GetGCEBootDiskType returns the short disk type name for an instance's boot disk.
-func (e *Environment) GetGCEBootDiskType(ctx context.Context, providerID string) (string, error) {
+// GetGCEBootDisk returns the persistent boot disk attached to the given instance.
+func (e *Environment) GetGCEBootDisk(ctx context.Context, providerID string) (*compute.Disk, error) {
 	project, zone, _, err := parseProviderID(providerID)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	instance, err := e.GetGCEInstance(ctx, providerID)
 	if err != nil {
-		return "", fmt.Errorf("getting instance: %w", err)
+		return nil, fmt.Errorf("getting instance: %w", err)
 	}
 	for _, attachedDisk := range instance.Disks {
 		if !attachedDisk.Boot {
 			continue
 		}
 		if attachedDisk.Source == "" {
-			return "", fmt.Errorf("instance %q boot disk has no source", instance.Name)
+			return nil, fmt.Errorf("instance %q boot disk has no source", instance.Name)
 		}
 		disk, err := e.computeSvc.Disks.Get(project, zone, path.Base(attachedDisk.Source)).Context(ctx).Do()
 		if err != nil {
-			return "", fmt.Errorf("getting instance %q boot disk: %w", instance.Name, err)
+			return nil, fmt.Errorf("getting instance %q boot disk: %w", instance.Name, err)
 		}
-		if disk.Type == "" {
-			return "", fmt.Errorf("instance %q boot disk has no type", instance.Name)
-		}
-		return path.Base(disk.Type), nil
+		return disk, nil
 	}
-	return "", fmt.Errorf("instance %q has no boot disk", instance.Name)
+	return nil, fmt.Errorf("instance %q has no boot disk", instance.Name)
+}
+
+// GetGCEBootDiskType returns the short disk type name for an instance's boot disk.
+func (e *Environment) GetGCEBootDiskType(ctx context.Context, providerID string) (string, error) {
+	disk, err := e.GetGCEBootDisk(ctx, providerID)
+	if err != nil {
+		return "", err
+	}
+	if disk.Type == "" {
+		return "", fmt.Errorf("boot disk %q has no type", disk.Name)
+	}
+	return path.Base(disk.Type), nil
+}
+
+func (e *Environment) CreateLocalSSDPool(ctx context.Context, tc TestCase) string {
+	prefix := TestPrefix(tc.Arch, tc.CapacityType, "cos", "lssd")
+	name := prefix + "-" + UniqueSuffix()
+	DeferCleanup(func(ctx context.Context) {
+		e.DeleteNodePool(ctx, name)
+		e.DeleteNodeClass(ctx, name)
+	})
+	e.CreateNodeClassForLocalSSD(ctx, name, gcpv1alpha1.ImageFamilyContainerOptimizedOS,
+		tc.BootDiskCategory, tc.LocalSSDMode)
+	e.WaitForNodeClassReady(ctx, name)
+	e.CreateNodePool(ctx, name, name, tc)
+	e.WaitForNodePoolReady(ctx, name)
+	return name
 }
 
 // CreateNodePool creates a NodePool with the given requirements and the default
@@ -1031,8 +1069,10 @@ func toAny(ss []string) []any {
 }
 
 // waitForReadyCondition polls until the named resource has Ready=True in its
-// status.conditions, retrying while the object exists but has no conditions yet.
-func (e *Environment) waitForReadyCondition(ctx context.Context, gvr schema.GroupVersionResource, name string, timeout time.Duration) {
+// status.conditions, retrying while the object exists but has no conditions yet. Every current
+// caller's Ready condition is expected within the same window (see NodePoolReadyTimeout et al.,
+// all 3 minutes); a caller that genuinely needs a different bound can call Eventually directly.
+func (e *Environment) waitForReadyCondition(ctx context.Context, gvr schema.GroupVersionResource, name string) {
 	Eventually(func(g Gomega) {
 		obj, err := e.DynamicClient.Resource(gvr).Get(ctx, name, metav1.GetOptions{})
 		g.Expect(err).NotTo(HaveOccurred(), "getting %s %s", gvr.Resource, name)
@@ -1048,12 +1088,12 @@ func (e *Environment) waitForReadyCondition(ctx context.Context, gvr schema.Grou
 			return
 		}
 		Fail(fmt.Sprintf("%s %s has no Ready condition", gvr.Resource, name))
-	}).WithTimeout(timeout).WithPolling(DefaultPollInterval).Should(Succeed())
+	}).WithTimeout(NodeClassReadyTimeout).WithPolling(DefaultPollInterval).Should(Succeed())
 }
 
 // WaitForNodePoolReady polls until the named NodePool reports Ready=True.
 func (e *Environment) WaitForNodePoolReady(ctx context.Context, name string) {
-	e.waitForReadyCondition(ctx, nodePoolGVR, name, NodePoolReadyTimeout)
+	e.waitForReadyCondition(ctx, nodePoolGVR, name)
 }
 
 // ConsistentlyExpectPendingPods requires Pods to remain unschedulable for the duration.
@@ -1243,13 +1283,49 @@ func podNames(pods []corev1.Pod) []string {
 // Shorter than ProvisioningTimeout so image-resolution failures surface fast.
 func (e *Environment) WaitForNodeClassReady(ctx context.Context, name string) {
 	GinkgoWriter.Printf("[setup] waiting for GCENodeClass %s to become Ready\n", name)
-	e.waitForReadyCondition(ctx, gceNodeClassGVR, name, NodeClassReadyTimeout)
+	e.waitForReadyCondition(ctx, gceNodeClassGVR, name)
+}
+
+// CreateCustomMachineType registers a GCECustomMachineType (see proposals/0009). If an object
+// with the same name already exists (leftover from a previous run), it is deleted first.
+// GCECustomMachineType is cluster-scoped, so name must be globally unique.
+func (e *Environment) CreateCustomMachineType(ctx context.Context, name, machineType, onDemandPrice, spotPrice string) {
+	deleteIfExists(ctx, e.DynamicClient, gceCustomMachineTypeGVR, name)
+	obj := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "karpenter.k8s.gcp/v1alpha1",
+		"kind":       "GCECustomMachineType",
+		"metadata":   map[string]any{"name": name, "labels": map[string]any{e2eOwnerLabel: "true"}},
+		"spec": map[string]any{
+			"machineType": machineType,
+			"prices": map[string]any{
+				"onDemand": onDemandPrice,
+				"spot":     spotPrice,
+			},
+		},
+	}}
+	_, err := e.DynamicClient.Resource(gceCustomMachineTypeGVR).Create(ctx, obj, metav1.CreateOptions{})
+	Expect(err).NotTo(HaveOccurred(), "creating GCECustomMachineType %s", name)
+}
+
+// DeleteCustomMachineType ignores 404 so callers need not check existence first.
+func (e *Environment) DeleteCustomMachineType(ctx context.Context, name string) {
+	err := e.DynamicClient.Resource(gceCustomMachineTypeGVR).Delete(ctx, name, metav1.DeleteOptions{})
+	if !apierrors.IsNotFound(err) {
+		Expect(err).NotTo(HaveOccurred(), "deleting GCECustomMachineType %s", name)
+	}
+}
+
+// WaitForCustomMachineTypeReady polls until the named GCECustomMachineType reports Ready=True,
+// confirming the gcecustommachinetype controller resolved the shape (via machineTypes.get) in
+// at least one cluster zone.
+func (e *Environment) WaitForCustomMachineTypeReady(ctx context.Context, name string) {
+	e.waitForReadyCondition(ctx, gceCustomMachineTypeGVR, name)
 }
 
 // WaitForNodeOverlayReady polls until the named NodeOverlay reports Ready=True,
 // which means that the controller validated it.
 func (e *Environment) WaitForNodeOverlayReady(ctx context.Context, name string) {
-	e.waitForReadyCondition(ctx, nodeOverlayGVR, name, NodeOverlayReadyTimeout)
+	e.waitForReadyCondition(ctx, nodeOverlayGVR, name)
 }
 
 // AddNodeClassMetadataEntry adds a single key/value pair to spec.metadata of the
@@ -1268,6 +1344,14 @@ func (e *Environment) AddNodeClassMetadataEntry(ctx context.Context, name, key, 
 	Expect(err).NotTo(HaveOccurred(), "marshaling metadata patch for GCENodeClass %s", name)
 	_, err = e.DynamicClient.Resource(gceNodeClassGVR).Patch(ctx, name, types.MergePatchType, body, metav1.PatchOptions{})
 	Expect(err).NotTo(HaveOccurred(), "patching spec.metadata on GCENodeClass %s", name)
+}
+
+// AddNodeClassLabels sets spec.labels on a GCENodeClass before provisioning a node.
+func (e *Environment) AddNodeClassLabels(ctx context.Context, name string, labels map[string]string) {
+	body, err := json.Marshal(map[string]any{"spec": map[string]any{"labels": labels}})
+	Expect(err).NotTo(HaveOccurred(), "marshaling label patch for GCENodeClass %s", name)
+	_, err = e.DynamicClient.Resource(gceNodeClassGVR).Patch(ctx, name, types.MergePatchType, body, metav1.PatchOptions{})
+	Expect(err).NotTo(HaveOccurred(), "patching spec.labels on GCENodeClass %s", name)
 }
 
 // CreateNodeClassWithAlias creates a GCENodeClass whose imageSelectorTerms uses

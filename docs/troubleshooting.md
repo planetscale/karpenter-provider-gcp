@@ -74,9 +74,32 @@ See [Image management](image-management.md) for version pinning options and form
 
 ## Custom machine types not discovered
 
-Karpenter discovers instance types by querying the GCP `machineTypes.aggregatedList` API, which returns only predefined catalog types. Custom machine types (e.g. `n2-custom-8-24576`) are not returned by this API and are therefore not available for scheduling via standard `karpenter.sh/instance-type` label requirements.
+Karpenter discovers most instance types by querying the GCP `machineTypes.aggregatedList` API, which returns only predefined catalog types. Custom machine types (e.g. `n2-custom-8-24576`) are never returned by this API, even when instances using that exact shape already exist in the project.
 
-This is a known limitation tracked in [GitHub issue #245](https://github.com/cloudpilot-ai/karpenter-provider-gcp/issues/245).
+To make a custom machine type schedulable, register it with a `GCECustomMachineType` object. GCP does not publish a price for custom shapes, so an on-demand and Spot price must be supplied explicitly:
+
+```yaml
+apiVersion: karpenter.k8s.gcp/v1alpha1
+kind: GCECustomMachineType
+metadata:
+  name: n2-custom-8-24576
+spec:
+  machineType: n2-custom-8-24576
+  prices:
+    onDemand: "0.40"
+    spot: "0.12"
+```
+
+A dedicated controller resolves the shape's vCPU/memory and per-zone availability via the GCP `machineTypes.get` API (which, unlike the aggregated list, does support custom shapes) and reports it on `status`:
+
+```sh
+kubectl get gcecustommachinetype n2-custom-8-24576
+kubectl describe gcecustommachinetype n2-custom-8-24576
+```
+
+Check the `Ready` condition if it doesn't show up as schedulable — `Ready=False` with reason `MachineTypeNotFound` means the named shape is invalid for its family, or the family doesn't support custom shapes in any zone available to the cluster.
+
+Once `Ready=True`, the registered shape joins the regular instance type catalog: it's schedulable via an exact `node.kubernetes.io/instance-type` requirement, or via ordinary CPU/memory requirements, exactly like a predefined type.
 
 ---
 
@@ -210,6 +233,8 @@ GC only deletes instances that carry the Karpenter cluster tag and have no corre
 
 When Karpenter cannot provision an instance due to insufficient capacity (Spot or on-demand), it logs the error and marks the zone/instance-type/capacity-type combination as unavailable. The duration depends on the error: 5 minutes for a stockout, 1 hour when GCE reports that the zone does not support the requested configuration (`configuration_availability` or `MACHINE_TYPE_UNSUPPORTED`), and 30 seconds for IP space exhaustion. Karpenter skips these cached entries during zone selection, allowing the TTL to expire naturally so zones can recover and become available again.
 
+If a NodeClass has more than one candidate pod range, Karpenter tries the next range when one reports IP space exhaustion. It marks the offering unavailable only after every candidate range is exhausted.
+
 If all zones for a given instance type are exhausted, Karpenter returns an insufficient capacity error immediately without attempting GCP API calls that would fail.
 
 To increase provisioning success:
@@ -231,6 +256,20 @@ To increase provisioning success:
   ```
 
 - Allow both spot and on-demand to let Karpenter fall back automatically.
+
+---
+
+## NodeClaim launch fails with `ResourceNotReady`
+
+If the `NodeClaim` `Launched` condition reports the reason `ResourceNotReady`, GCE rejected the instance. A resource that the instance references is not ready yet. This resource is usually the boot image, for example when the image status changed after Karpenter selected it.
+
+The problem affects every instance type, so Karpenter does not try the next instance type. It also does not mark the instance type or zone as unavailable. Karpenter retries the launch later and starts again from the lowest-priced instance type. The launch succeeds after the resource becomes ready.
+
+If the condition persists, confirm that the boot image status is `READY`:
+
+```sh
+gcloud compute images describe <image-name> --project <image-project> --format="value(status)"
+```
 
 ---
 

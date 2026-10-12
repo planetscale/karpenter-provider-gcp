@@ -28,6 +28,7 @@ import (
 
 // GCENodeClassSpec is the top level specification for the GCP Karpenter Provider.
 // This will contain the configuration necessary to launch instances in GCP.
+// +kubebuilder:validation:XValidation:message="subnetRangeName and subnetRangeNames are mutually exclusive",rule="!(has(self.subnetRangeName) && has(self.subnetRangeNames))"
 type GCENodeClassSpec struct {
 	// ServiceAccount is the GCP IAM service account email to assign to the instance
 	// +kubebuilder:validation:Pattern=`^[^@]+@(developer\.gserviceaccount\.com|[^@]+\.iam\.gserviceaccount\.com)$`
@@ -50,14 +51,30 @@ type GCENodeClassSpec struct {
 	// +optional
 	ImageFamily *string `json:"imageFamily,omitempty"`
 	// SubnetRangeName is the name of the subnetwork secondary IPv4 range from which
-	// to allocate pod IP addresses (alias IPs for pods). If not specified, the cluster's
-	// default pod secondary range (ClusterSecondaryRangeName from the cluster's IP
-	// allocation policy) is used.
+	// to allocate pod IP addresses (alias IPs for pods). When set, only this range is
+	// considered. Mutually exclusive with subnetRangeNames. If neither field is set,
+	// the cluster's default and additional pod ranges on its primary subnetwork are used.
+	//
+	// Deprecated: use SubnetRangeNames with a single entry instead.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$`
 	// +optional
 	SubnetRangeName *string `json:"subnetRangeName,omitempty"`
+	// SubnetRangeNames is a list of subnetwork secondary IPv4 range names from which
+	// to allocate pod IP addresses (alias IPs for pods). When more than one name is
+	// listed, the provider prefers the range with the most Compute-reported free IPv4 addresses
+	// at launch. Mutually exclusive with subnetRangeName. When set, this list replaces
+	// the cluster defaults completely. If neither field is set, the cluster's default
+	// and additional pod ranges on its primary subnetwork are used.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:XValidation:message="subnetRangeNames must be unique",rule="self.all(x, self.exists_one(y, x == y))"
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Pattern=`^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$`
+	// +optional
+	SubnetRangeNames []string `json:"subnetRangeNames,omitempty"`
 	// KubeletConfiguration defines args to be used when configuring kubelet on provisioned nodes.
 	// They are a vswitch of the upstream types, recognizing not all options may be supported.
 	// Wherever possible, the types and names should reflect the upstream kubelet types.
@@ -70,7 +87,8 @@ type GCENodeClassSpec struct {
 	// Mirrors GKE node pool linux_node_config.
 	// +optional
 	LinuxNodeConfig *LinuxNodeConfig `json:"linuxNodeConfig,omitempty"`
-	// Labels to be applied on GCE VM instance.
+	// Labels to be applied on the GCE VM instance and its persistent disks.
+	// Local SSD scratch disks do not support labels.
 	// +kubebuilder:validation:MaxProperties=20
 	// +kubebuilder:validation:XValidation:message="empty tag keys aren't supported",rule="self.all(k, k != '')"
 	// +kubebuilder:validation:XValidation:message="tag contains a restricted tag matching gce:gce-cluster-name",rule="self.all(k, k !='gce:gce-cluster-name')"
@@ -89,6 +107,17 @@ type GCENodeClassSpec struct {
 	// +kubebuilder:validation:MaxItems=20
 	// +optional
 	NetworkTags []NetworkTag `json:"networkTags,omitempty"`
+	// ResourceManagerTags are GCP resource manager (secure) tags bound to the instance
+	// at creation. Unlike network tags, binding them is IAM-controlled, so they can be
+	// used as targets in network firewall policies, IAM conditions and organization policies.
+	// Keys are `tagKeys/{tag_key_id}` or `{org_id|project_id}/{tag_key_short_name}`; values are
+	// `tagValues/{tag_value_id}` or `{tag_value_short_name}`. Mirrors GKE node pool
+	// resource_manager_tags. The Karpenter service account needs roles/resourcemanager.tagUser
+	// on the tag values.
+	// +kubebuilder:validation:MaxProperties=50
+	// +kubebuilder:validation:XValidation:message="invalid resourceManagerTags key",rule="self.all(k, k.matches('^tagKeys/[0-9]+$') || (!k.startsWith('tagKeys/') && k.matches('^[^/]+/[^/]+$')))"
+	// +optional
+	ResourceManagerTags map[string]ResourceManagerTagValue `json:"resourceManagerTags,omitempty"`
 	// ShieldedInstanceConfig enables Shielded VM for provisioned nodes: Secure Boot,
 	// virtual TPM, and integrity monitoring.
 	// +optional
@@ -398,6 +427,13 @@ type SecondaryBootDiskMode string
 // +kubebuilder:validation:MaxLength=63
 type NetworkTag string
 
+// ResourceManagerTagValue is a resource manager tag value, either `tagValues/{tag_value_id}`
+// or a `{tag_value_short_name}` under a namespaced key.
+// +kubebuilder:validation:Pattern=`^(tagValues/[0-9]+|[^/]+)$`
+// +kubebuilder:validation:MinLength=1
+// +kubebuilder:validation:MaxLength=63
+type ResourceManagerTagValue string
+
 // ShieldedInstanceConfig defines the Shielded VM options for a GCE instance.
 type ShieldedInstanceConfig struct {
 	// EnableSecureBoot defines whether the instance has Secure Boot enabled.
@@ -553,4 +589,19 @@ func (in *GCENodeClass) GetMaxPods() int32 {
 		return *in.Spec.KubeletConfiguration.MaxPods
 	}
 	return KubeletMaxPods
+}
+
+// PodSubnetRangeNames returns the NodeClass-configured pod secondary range names.
+// An empty result means the launch path should discover the cluster's pod ranges.
+func (in *GCENodeClass) PodSubnetRangeNames() []string {
+	if in == nil {
+		return nil
+	}
+	if len(in.Spec.SubnetRangeNames) > 0 {
+		return append([]string(nil), in.Spec.SubnetRangeNames...)
+	}
+	if in.Spec.SubnetRangeName != nil && *in.Spec.SubnetRangeName != "" {
+		return []string{*in.Spec.SubnetRangeName}
+	}
+	return nil
 }

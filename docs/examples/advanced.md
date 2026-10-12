@@ -272,7 +272,7 @@ localSsdMode: Ephemeral
 
 `localSsdMode` does not set how many disks a node gets. The machine type decides that.
 
-**Fixed-count machine types**, such as `c4d-standard-8-lssd` or `z3-highmem-8-highlssd`, include a set number of local SSDs. Select the machine type and the disks are attached:
+**Fixed-count machine types**, such as `c4d-standard-8-lssd`, `z3-highmem-8-highlssd`, or `z4d-highmem-8-highlssd`, include a set number of local SSDs. Select the machine type and the disks are attached:
 
 ```yaml
 nodeSelector:
@@ -299,7 +299,11 @@ nodeSelector:
 
 If the requirements allow more than one count, Karpenter does not launch the node. The supported counts depend on the machine family and vCPU count; see the GCE [general-purpose](https://cloud.google.com/compute/docs/general-purpose-machines) and [compute-optimized](https://cloud.google.com/compute/docs/compute-optimized-machines) machine family pages.
 
-In `Ephemeral` mode, Karpenter checks a Pod's `ephemeral-storage` request against the capacity of the selected disks, which is 375 GiB per disk on most machine types. The request does not choose the count. In `RawBlock` mode, `ephemeral-storage` reflects only the boot disk.
+In `Ephemeral` mode, Karpenter checks a Pod's `ephemeral-storage` request against the capacity of the selected disks. Most machine types provide 375 GiB per disk. Z3 virtual machines provide 3,000 GiB, the Z3 bare-metal type `z3-highmem-192-highlssd-metal` provides 6,000 GiB, and Z4D provides 3,500 GiB. The request does not choose the count. In `RawBlock` mode, `ephemeral-storage` reflects only the boot disk.
+
+Z4D supports only Hyperdisk. If you set a boot disk `category`, choose a Hyperdisk type such as `hyperdisk-balanced`.
+
+Karpenter sets `scheduling.onHostMaintenance` to `MIGRATE` for on-demand Z3 and Z4D virtual machine (non-bare-metal) nodes, so they live-migrate during host maintenance. Compute Engine cannot live-migrate Z3 shapes with more than 18 TiB of bundled local SSD or Z4D shapes with more than 42,000 GiB. Karpenter sets `TERMINATE` for those shapes and for Spot nodes.
 
 If you are upgrading from a version that accepted `spec.disks[].category: local-ssd`, see [`MIGRATION.md`](https://github.com/cloudpilot-ai/karpenter-provider-gcp/blob/main/MIGRATION.md).
 
@@ -419,6 +423,45 @@ Common GCP instance labels:
 | `karpenter.k8s.gcp/instance-generation` | Machine type name | Parsed from standard machine family names; prefer `instance-family` when possible. |
 | `karpenter.k8s.gcp/instance-shape`      | Machine type name | Parsed from standard machine type names, for example `standard` or `highmem`.      |
 | `karpenter.k8s.gcp/instance-size`       | Machine type name | Parsed from standard machine type names.                                           |
+| `karpenter.k8s.gcp/instance-bare-metal` | Machine type name | `"true"` for names ending in `-metal`, otherwise `"false"`.                        |
+
+### Bare-metal selection
+
+To require VMs, add this requirement to a NodePool's `spec.template.spec.requirements`:
+
+```yaml
+- key: karpenter.k8s.gcp/instance-bare-metal
+  operator: In
+  values: ["false"]
+```
+
+To require bare metal instead:
+
+```yaml
+- key: karpenter.k8s.gcp/instance-bare-metal
+  operator: In
+  values: ["true"]
+```
+
+The label follows the Compute Engine `-metal` naming convention, including bundled-SSD names such as `c4-standard-288-lssd-metal`. No bare-metal API field is available. The label does not change default instance selection or guarantee compatibility with a NodeClass's configuration.
+
+Pods can select VMs with `nodeSelector`:
+
+```yaml
+spec:
+  nodeSelector:
+    karpenter.k8s.gcp/instance-bare-metal: "false"
+```
+
+Use `"true"` to select bare metal. A NodePool requirement constrains only that pool. To prohibit metal for a workload across pools, constrain the pod or every eligible pool.
+
+#### Adopting the label on existing nodes
+
+No configuration changes are required when upgrading. This label does not change instance selection or cause drift unless you add requirements that use it.
+
+The following caveats apply only when adopting the new label on an existing pool. Existing Nodes and NodeClaims do not receive this label automatically. `In ["false"]` rejects unlabeled legacy nodes, including VMs. Adding it to a NodePool marks those NodeClaims as drifted, subject to disruption controls. Pods that explicitly select this label cannot use unlabeled existing Nodes. Karpenter may provision a new matching node even when those existing Nodes have spare capacity.
+
+### Machine-family selection
 
 For example, use `nodeAffinity` when a workload can run on any of several machine families:
 
