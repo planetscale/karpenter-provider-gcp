@@ -287,9 +287,23 @@ func TestNodeClassDriftFieldCoverage(t *testing.T) {
 			want: NodeClassDrift,
 		},
 		{
+			name: "ResourceManagerTags",
+			mutate: func(nc *v1alpha1.GCENodeClass) {
+				nc.Spec.ResourceManagerTags = map[string]v1alpha1.ResourceManagerTagValue{"tagKeys/123": "tagValues/456"}
+			},
+			want: NodeClassDrift,
+		},
+		{
 			name: "ShieldedInstanceConfig",
 			mutate: func(nc *v1alpha1.GCENodeClass) {
 				nc.Spec.ShieldedInstanceConfig = &v1alpha1.ShieldedInstanceConfig{EnableSecureBoot: ptr(true)}
+			},
+			want: NodeClassDrift,
+		},
+		{
+			name: "AdvancedMachineFeatures",
+			mutate: func(nc *v1alpha1.GCENodeClass) {
+				nc.Spec.AdvancedMachineFeatures = &v1alpha1.AdvancedMachineFeatures{EnableNestedVirtualization: ptr(true)}
 			},
 			want: NodeClassDrift,
 		},
@@ -299,6 +313,13 @@ func TestNodeClassDriftFieldCoverage(t *testing.T) {
 				nc.Spec.NetworkConfig = &v1alpha1.NetworkConfig{
 					Subnetwork: "regions/us-central1/subnetworks/custom",
 				}
+			},
+			want: NodeClassDrift,
+		},
+		{
+			name: "SubnetRangeNames",
+			mutate: func(nc *v1alpha1.GCENodeClass) {
+				nc.Spec.SubnetRangeNames = []string{"pods-a", "pods-b"}
 			},
 			want: NodeClassDrift,
 		},

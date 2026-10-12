@@ -111,6 +111,8 @@ func (p reproTypes) GetMachineType(string) *computepb.MachineType      { return 
 
 type reproGKE struct{}
 
+func (reproGKE) InvalidateClusterConfig() {}
+
 func (reproGKE) ResolveClusterZones(context.Context) ([]string, error) {
 	return []string{"us-central1-a"}, nil
 }
@@ -128,14 +130,13 @@ type reproTemplate struct{}
 func (reproTemplate) Sync(context.Context) error               { return nil }
 func (reproTemplate) EnsureFallbackPool(context.Context) error { return nil }
 func (reproTemplate) GetSourceTemplateMetadata(context.Context) (*compute.Metadata, error) {
-	const kubeEnv = "CA_CERT: test-ca\n" +
-		"KUBE_MANIFESTS_TAR_URL: https://storage.googleapis.com/gke-release/kubernetes/release/v1.30.1-gke.123/kubernetes-manifests.tar.gz\n" +
-		"KUBERNETES_MASTER_NAME: 10.0.0.2\n" +
-		"SERVER_BINARY_TAR_HASH: amd64-sha512\n" +
-		"SERVER_BINARY_TAR_URL: https://storage.googleapis.com/gke-release/kubernetes/release/v1.30.1-gke.123/kubernetes-server-linux-amd64.tar.gz\n"
 	return &compute.Metadata{Items: []*compute.MetadataItems{{
-		Key:   metadata.KubeEnvKey,
-		Value: lo.ToPtr(kubeEnv),
+		Key: metadata.KubeEnvKey,
+		Value: lo.ToPtr("CA_CERT: test-ca\n" +
+			"KUBE_MANIFESTS_TAR_URL: https://storage.googleapis.com/gke-release/kubernetes/release/v1.30.1-gke.123/kubernetes-manifests.tar.gz\n" +
+			"KUBERNETES_MASTER_NAME: 10.0.0.2\n" +
+			"SERVER_BINARY_TAR_HASH: amd64-sha512\n" +
+			"SERVER_BINARY_TAR_URL: https://storage.googleapis.com/gke-release/kubernetes/release/v1.30.1-gke.123/kubernetes-server-linux-amd64.tar.gz\n"),
 	}}}, nil
 }
 
@@ -480,7 +481,7 @@ func runCreateScenario(t *testing.T, config createConfig) createResult { //nolin
 	defer srv.Close()
 	svc, err := compute.NewService(ctx, googleoption.WithEndpoint(srv.URL+"/"), googleoption.WithoutAuthentication())
 	require.NoError(t, err)
-	ip := instance.NewProvider("cluster", "us-central1", "us-central1", "test", "node@test", "", svc, reproGKE{}, typeProvider, reproTemplate{}, reproVersion{}, unavailableofferings.NewUnavailableOfferings())
+	ip := instance.NewProvider("cluster", "us-central1", "us-central1", "test", "node@test", "", svc, reproGKE{}, nil, typeProvider, reproTemplate{}, reproVersion{}, unavailableofferings.NewUnavailableOfferings())
 	cp := New(kc, reproEvents{}, typeProvider, ip, nil)
 	if len(results.NewNodeClaims) > 0 {
 		generated := results.NewNodeClaims[0].ToNodeClaim()

@@ -122,6 +122,9 @@ E2E_PREFIX       ?= karpenter-e2e
 E2E_REGION       ?= us-central1
 E2E_CLUSTER_NAME         ?= $(E2E_PREFIX)-cluster
 E2E_PODS_RANGE           ?= $(E2E_PREFIX)-pods
+E2E_SMALL_PODS_RANGE     ?= $(E2E_PREFIX)-pods-small
+E2E_LARGE_PODS_RANGE     ?= $(E2E_PREFIX)-pods-large
+E2E_RESOURCE_MANAGER_TAG_KEY ?= $(E2E_PREFIX)-tag
 E2E_KARPENTER_NAMESPACE  ?=
 E2E_KARPENTER_DEPLOYMENT ?=
 
@@ -167,6 +170,8 @@ e2e-tests: require-e2e-vars ## Run selected features (E2E_SELECTION=standard|gpu
 	CLUSTER_NAME=$(E2E_CLUSTER_NAME) \
 	CLUSTER_LOCATION=$(E2E_LOCATION) \
 	PODS_RANGE_NAME=$(E2E_PODS_RANGE) \
+	SMALL_PODS_RANGE_NAME=$(E2E_SMALL_PODS_RANGE) LARGE_PODS_RANGE_NAME=$(E2E_LARGE_PODS_RANGE) \
+	RESOURCE_MANAGER_TAG_KEY=$(E2E_RESOURCE_MANAGER_TAG_KEY) \
 	KARPENTER_NAMESPACE=$(E2E_KARPENTER_NAMESPACE) \
 	KARPENTER_DEPLOYMENT=$(E2E_KARPENTER_DEPLOYMENT) \
 	go run ./hack/e2e-runner --selection="$(or $(E2E_SELECTION),$(E2E_PRESET),standard)" --report=$(E2E_REPORT) --lock-id="$(E2E_LOCK_ID)" -- --procs=$(GINKGO_PROCS) --timeout=2h -v
@@ -179,11 +184,13 @@ e2e-test: require-e2e-vars ## Run a feature directory or focused spec (SUITE=<na
 	CLUSTER_NAME=$(E2E_CLUSTER_NAME) \
 	CLUSTER_LOCATION=$(E2E_LOCATION) \
 	PODS_RANGE_NAME=$(E2E_PODS_RANGE) \
+	SMALL_PODS_RANGE_NAME=$(E2E_SMALL_PODS_RANGE) LARGE_PODS_RANGE_NAME=$(E2E_LARGE_PODS_RANGE) \
+	RESOURCE_MANAGER_TAG_KEY=$(E2E_RESOURCE_MANAGER_TAG_KEY) \
 	KARPENTER_NAMESPACE=$(E2E_KARPENTER_NAMESPACE) \
 	KARPENTER_DEPLOYMENT=$(E2E_KARPENTER_DEPLOYMENT) \
 	go run github.com/onsi/ginkgo/v2/ginkgo --procs=$(GINKGO_PROCS) --timeout=30m -v \
 	$(if $(FOCUS),--focus="$(FOCUS)",) \
-	$(if $(SUITE),,--label-filter='!suite:gpu') \
+	$(if $(SUITE),,--label-filter='!suite:gpu && !suite:local-ssd-extended') \
 	$(if $(SUITE),./test/suites/$(SUITE)/,./test/suites/)
 
 e2e-teardown: ## Delete the e2e GKE cluster and all supporting GCP infra
@@ -214,6 +221,11 @@ update-pdcsi-compatibility: ## Update vendored PDCSI disk compatibility data fro
 	@src="$$(cd $(PDCSI_DATA_DIR) && go list -mod=mod -m -f '{{ .Dir }}' $(PDCSI_MODULE))/$(PDCSI_NODE_LABELER_CONFIGMAP)"; \
 		test -f "$$src" || (echo "PDCSI node-labeler ConfigMap not found at $$src" >&2; exit 1); \
 		cp "$$src" pkg/providers/disktype/pdcsi/node-labeler-configmap.yaml
+	@if git apply --check pkg/providers/disktype/pdcsi/gen4-pd-compatibility.patch 2>/dev/null; then \
+		git apply pkg/providers/disktype/pdcsi/gen4-pd-compatibility.patch; \
+	else \
+		git apply --reverse --check pkg/providers/disktype/pdcsi/gen4-pd-compatibility.patch; \
+	fi
 
 update-pricing:
 	@tmpdir=$$(mktemp -d); \

@@ -46,16 +46,23 @@ CLUSTER_NAME="${E2E_PREFIX}-cluster"
 NETWORK_NAME="${E2E_PREFIX}-vpc"
 SUBNET_NAME="${E2E_PREFIX}-subnet"
 PODS_RANGE="${E2E_PREFIX}-pods"
+SMALL_PODS_RANGE="${E2E_PREFIX}-pods-small"
+LARGE_PODS_RANGE="${E2E_PREFIX}-pods-large"
 SERVICES_RANGE="${E2E_PREFIX}-services"
 GSA_ID="${E2E_PREFIX}-karpenter"
 GSA_EMAIL="${GSA_ID}@${E2E_PROJECT_ID}.iam.gserviceaccount.com"
 AR_REPO="${E2E_PREFIX}-images"
 ROUTER_NAME="${E2E_PREFIX}-router"
 NAT_NAME="${E2E_PREFIX}-nat"
+# Short names; RESOURCE_MANAGER_TAG_VALUE must match environment.ResourceManagerTagValue.
+RESOURCE_MANAGER_TAG_KEY="${E2E_PREFIX}-tag"
+RESOURCE_MANAGER_TAG_VALUE="e2e"
 IMAGE_REPO="${E2E_REGION}-docker.pkg.dev/${E2E_PROJECT_ID}/${AR_REPO}/karpenter"
 
 PRIMARY_CIDR="10.0.0.0/20"
 PODS_CIDR="10.4.0.0/14"
+SMALL_PODS_CIDR="10.12.0.0/22"
+LARGE_PODS_CIDR="10.16.0.0/20"
 SERVICES_CIDR="10.8.0.0/20"
 
 REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
@@ -103,6 +110,38 @@ else
     --quiet
 fi
 
+# Two dedicated pod ranges for the multi-pod-range e2e tests. Added to this
+# subnet so both are valid pod range candidates for the same cluster. Largest
+# first would be the obvious ordering; the tests list the smaller one first to
+# prove free-IP ranking actually drives selection.
+SUBNET_SECONDARY_RANGES="$(gcloud compute networks subnets describe "${SUBNET_NAME}" \
+  --region "${E2E_REGION}" --project "${E2E_PROJECT_ID}" \
+  --flatten='secondaryIpRanges[]' \
+  --format='csv[no-heading](secondaryIpRanges.rangeName,secondaryIpRanges.ipCidrRange)')"
+MISSING_POD_RANGES=""
+for entry in "${SMALL_PODS_RANGE}=${SMALL_PODS_CIDR}" "${LARGE_PODS_RANGE}=${LARGE_PODS_CIDR}"; do
+  RANGE_NAME="${entry%%=*}"
+  RANGE_CIDR="${entry#*=}"
+  EXISTING_CIDR="$(printf '%s\n' "${SUBNET_SECONDARY_RANGES}" \
+    | awk -F, -v name="${RANGE_NAME}" '$1 == name { print $2 }')"
+  if [ -z "${EXISTING_CIDR}" ]; then
+    log "Adding pod range ${RANGE_NAME}=${RANGE_CIDR} to subnet ${SUBNET_NAME}..."
+    MISSING_POD_RANGES="${MISSING_POD_RANGES:+${MISSING_POD_RANGES},}${RANGE_NAME}=${RANGE_CIDR}"
+  elif [ "${EXISTING_CIDR}" != "${RANGE_CIDR}" ]; then
+    echo "ERROR: secondary range ${RANGE_NAME} exists as ${EXISTING_CIDR}, but e2e tests expect ${RANGE_CIDR}." >&2
+    echo "Remove or rename that secondary range and re-run, or update the fixture CIDRs in this script." >&2
+    exit 1
+  else
+    log "Reusing pod range ${RANGE_NAME}=${EXISTING_CIDR}"
+  fi
+done
+if [ -n "${MISSING_POD_RANGES}" ]; then
+  gcloud compute networks subnets update "${SUBNET_NAME}" \
+    --region "${E2E_REGION}" \
+    --project "${E2E_PROJECT_ID}" \
+    --add-secondary-ranges "${MISSING_POD_RANGES}" \
+    --quiet
+fi
 # Cloud Router (prerequisite for Cloud NAT)
 if gcloud compute routers describe "${ROUTER_NAME}" \
     --region "${E2E_REGION}" --project "${E2E_PROJECT_ID}" \
@@ -190,6 +229,32 @@ gcloud iam service-accounts add-iam-policy-binding "${COMPUTE_DEFAULT_SA}" \
   --project "${E2E_PROJECT_ID}" \
   --quiet >/dev/null
 
+# Resource manager tag for the GCENodeClass spec.resourceManagerTags e2e.
+TAG_KEY_NAMESPACED="${E2E_PROJECT_ID}/${RESOURCE_MANAGER_TAG_KEY}"
+if gcloud resource-manager tags keys describe "${TAG_KEY_NAMESPACED}" &>/dev/null; then
+  log "Reusing tag key ${TAG_KEY_NAMESPACED}"
+else
+  log "Creating tag key ${TAG_KEY_NAMESPACED}..."
+  gcloud resource-manager tags keys create "${RESOURCE_MANAGER_TAG_KEY}" \
+    --parent "projects/${E2E_PROJECT_ID}" \
+    --description "Karpenter e2e resourceManagerTags" \
+    --quiet >/dev/null
+fi
+if gcloud resource-manager tags values describe "${TAG_KEY_NAMESPACED}/${RESOURCE_MANAGER_TAG_VALUE}" &>/dev/null; then
+  log "Reusing tag value ${TAG_KEY_NAMESPACED}/${RESOURCE_MANAGER_TAG_VALUE}"
+else
+  log "Creating tag value ${TAG_KEY_NAMESPACED}/${RESOURCE_MANAGER_TAG_VALUE}..."
+  gcloud resource-manager tags values create "${RESOURCE_MANAGER_TAG_VALUE}" \
+    --parent "${TAG_KEY_NAMESPACED}" \
+    --quiet >/dev/null
+fi
+# Binding a tag to an instance needs tagValueBindings.create on the tag value.
+log "Binding tagUser on tag key ${TAG_KEY_NAMESPACED}..."
+gcloud resource-manager tags keys add-iam-policy-binding "${TAG_KEY_NAMESPACED}" \
+  --member "serviceAccount:${GSA_EMAIL}" \
+  --role roles/resourcemanager.tagUser \
+  --quiet >/dev/null
+
 # Artifact Registry
 if gcloud artifacts repositories describe "${AR_REPO}" \
     --location "${E2E_REGION}" --project "${E2E_PROJECT_ID}" &>/dev/null; then
@@ -270,6 +335,26 @@ case "${CLUSTER_STATUS}" in
     exit 1
     ;;
 esac
+
+# Attach the dedicated pod ranges before deploying so the controller starts
+# with fresh cluster configuration.
+CLUSTER_POD_RANGES="$(gcloud container clusters describe "${CLUSTER_NAME}" \
+  --location "${E2E_LOCATION}" --project "${E2E_PROJECT_ID}" \
+  --format='csv[no-heading](ipAllocationPolicy.additionalPodRangesConfig.podRangeNames)')"
+MISSING_CLUSTER_RANGES=""
+for RANGE_NAME in "${SMALL_PODS_RANGE}" "${LARGE_PODS_RANGE}"; do
+  if [[ ",${CLUSTER_POD_RANGES}," != *",${RANGE_NAME},"* ]]; then
+    MISSING_CLUSTER_RANGES="${MISSING_CLUSTER_RANGES:+${MISSING_CLUSTER_RANGES},}${RANGE_NAME}"
+  fi
+done
+if [ -n "${MISSING_CLUSTER_RANGES}" ]; then
+  log "Attaching pod ranges ${MISSING_CLUSTER_RANGES} to cluster ${CLUSTER_NAME}..."
+  gcloud container clusters update "${CLUSTER_NAME}" \
+    --location "${E2E_LOCATION}" \
+    --project "${E2E_PROJECT_ID}" \
+    --additional-pod-ipv4-ranges "${MISSING_CLUSTER_RANGES}" \
+    --quiet
+fi
 
 log "Fetching cluster credentials..."
 gcloud container clusters get-credentials "${CLUSTER_NAME}" \

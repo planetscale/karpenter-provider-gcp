@@ -5,6 +5,71 @@
 
 ## Unreleased
 
+### New IAM permission required for resource manager tags: `compute.instances.createTagBinding`
+
+Setting the new `GCENodeClass.spec.resourceManagerTags` field requires the controller's service account to have `compute.instances.createTagBinding` on the project, which is now included in [`deploy/iam/karpenter-controller-role.yaml`](deploy/iam/karpenter-controller-role.yaml). If you created the `karpenter_controller` custom role from an earlier version of that file, update it with `gcloud iam roles update` before you set `resourceManagerTags`; without it, instance creation fails for that NodeClass. The service account also needs `roles/resourcemanager.tagUser` on the tag values, their tag key, or a parent resource. No action is required if you don't use `resourceManagerTags`. See [Resource manager tags](docs/examples/networking.md#resource-manager-tags).
+
+### Corrected disk compatibility for C4A and N4
+
+New C4A and N4 nodes no longer advertise `disk-type.gke.io/pd-balanced` or `disk-type.gke.io/pd-ssd`. Karpenter excludes these families when workloads require either label.
+
+Existing Nodes and NodeClaims retain their old labels. Replace affected nodes or remove both unsupported labels from affected Nodes and NodeClaims before relying on disk topology for placement. This change does not migrate disks or add disk affinity to existing PersistentVolumes.
+
+### Adopting the bare-metal selector
+
+No configuration changes are required when upgrading. The new `karpenter.k8s.gcp/instance-bare-metal` label does not change instance selection or cause drift unless you add requirements that use it.
+
+The following caveats apply only when adopting the new label on an existing pool. Existing Nodes and NodeClaims do not receive the label automatically.
+
+Use `In ["false"]` to require VMs, or `In ["true"]` to require bare metal. Both reject unlabeled legacy nodes. Adding either requirement to a NodePool marks unlabeled legacy NodeClaims as drifted. Replacement follows normal disruption controls. Pods that explicitly select this label cannot use unlabeled existing Nodes. Karpenter may provision a new matching node even when those existing Nodes have spare capacity.
+
+## v0.7.0
+
+### Multiple pod CIDR ranges on GCENodeClass
+
+`GCENodeClass` now accepts `spec.subnetRangeNames`, a list of GKE secondary IPv4 range names for
+pod alias IPs. When more than one name is eligible, Karpenter prefers the range with the most
+Compute-reported free IPv4 addresses and retries remaining names if Compute returns IP space
+exhausted. Resolved names and optional integer `totalFreeIP` counts are published on
+`status.subnetRanges`.
+
+`spec.subnetRangeName` is deprecated but remains supported for backward compatibility.
+Use `spec.subnetRangeNames` instead, even for a single range. The two fields are mutually
+exclusive. Either field completely replaces the discovered range list; overrides are not
+merged with cluster ranges. If neither is set, Karpenter now considers the cluster default
+plus additional pod ranges reported by GKE on the primary subnetwork.
+
+**Recommended migration:** replace `subnetRangeName: pods` with `subnetRangeNames: [pods]`,
+using your existing range name, and remove `subnetRangeName`. No immediate action is required;
+removal of the deprecated field will be announced separately. Migrating from `subnetRangeName`
+to `subnetRangeNames` marks existing nodes as drifted and may cause Karpenter to replace them.
+
+**Default behavior change:** NodeClasses with both fields omitted can now allocate from
+additional cluster pod ranges. To retain default-range-only allocation, set
+`subnetRangeNames: [CLUSTER_DEFAULT_RANGE_NAME]`. Otherwise, omit both fields to use all
+cluster-level ranges, or set `subnetRangeNames` to restrict allocation to specific ranges.
+Ranges on separate additional subnetworks are not discovered.
+
+**Capacity reporting:** `status.subnetRanges[].totalFreeIP` is optional. Zero is a reported
+count; an omitted count means unknown capacity. Counts are cached for one minute and do not
+guarantee an allocatable contiguous pod CIDR block. A failed or timed-out capacity read leaves
+launch order unchanged and clears status counts; allocation still relies on Compute insertion
+and range fallback.
+
+The controller now reads `subnetworks.get` with `WITH_UTILIZATION` for capacity. The custom role
+already includes `compute.subnetworks.get`; ensure the controller also has that permission in
+any Shared VPC host project containing the target subnetwork. No new IAM permission is added.
+
+### New IAM permission required: `compute.machineTypes.get`
+
+Registering a `GCECustomMachineType` requires the controller's service account to have `compute.machineTypes.get`, in addition to the existing `compute.machineTypes.list`. Add it to your controller's IAM role before upgrading; see [`deploy/iam/karpenter-controller-role.yaml`](deploy/iam/karpenter-controller-role.yaml). Without it, every `GCECustomMachineType` registration is treated as a transient failure and retried rather than marked `Ready=False` — it stays stuck at `Ready=Unknown` indefinitely instead of surfacing a clear error, so check the controller logs for `PermissionDenied` if a registration never becomes `Ready`.
+
+### NodeClass labels now apply to newly provisioned persistent disks
+
+`GCENodeClass.spec.labels` now applies to the VM instance and all persistent disks created from `spec.disks`, including the boot disk. Existing disks are not relabeled by this change, and local SSDs and CSI-managed volumes are outside its scope.
+
+**Action required:** update the controller's custom IAM role from [`deploy/iam/karpenter-controller-role.yaml`](deploy/iam/karpenter-controller-role.yaml) before upgrading. Compute Engine requires `compute.disks.setLabels` when creating a disk with labels through `instances.insert`; without it, provisioning fails for NodeClasses with non-empty `spec.labels`.
+
 ### Replace the non-working local SSD disk category
 
 `GCENodeClass.spec.disks[].category: local-ssd` never provisioned local SSDs successfully and is no longer accepted by the CRD. If your NodeClass uses it, remove that disk entry before upgrading the CRD. To provision local SSDs, use `spec.localSsdMode` (`RawBlock` by default; set `Ephemeral` for kubelet storage). For configurable machine families (`n1`, `n2`, `n2d`, `c2`, `c2d`), declare `karpenter.k8s.gcp/instance-local-ssd-count` on the NodePool and select one exact count through the NodePool or Pod requirements. Fixed-count local SSD machine types, such as `c4d-standard-8-lssd`, do not need a Pod count selector. See [Proposal 0003](proposals/0003-local-ssd-support.md#migration) for examples.

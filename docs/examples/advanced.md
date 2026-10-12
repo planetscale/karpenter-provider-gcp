@@ -142,6 +142,66 @@ kubeletConfiguration:
 
 > **Note:** Setting `maxParallelImagePulls` to `2` or greater requires `serializeImagePulls: false`; admission otherwise fails with `maxParallelImagePulls greater than 1 requires serializeImagePulls to be explicitly set to false`. `maxParallelImagePulls: 1` on its own is accepted without any `serializeImagePulls` change, and omitting both fields preserves the default serialized behavior.
 
+## Static hugepages
+
+Set `spec.linuxNodeConfig.hugepages` to pre-allocate hugepages on every node that the GCENodeClass provisions. The node allocates the pages at boot, before the kubelet starts, and reports them as `hugepages-2Mi` and `hugepages-1Gi` node capacity.
+
+```yaml
+linuxNodeConfig:
+  hugepages:
+    hugepageSize2m: 4096  # 4096 × 2 MiB = 8 GiB
+    hugepageSize1g: 4     # 4 × 1 GiB = 4 GiB
+```
+
+- `hugepageSize2m` — number of 2 MiB hugepages to allocate
+- `hugepageSize1g` — number of 1 GiB hugepages to allocate
+
+Each field is a page count with a minimum of `1`. Omit a field to allocate no pages of that size. Nodes don't inherit hugepages from the GKE node pool that Karpenter uses as its bootstrap template.
+
+The fields mirror the GKE [pre-allocated hugepages](https://cloud.google.com/kubernetes-engine/docs/how-to/node-system-config#pre-allocated-hugepages) settings, and the GKE limits apply:
+
+- Hugepages can use at most 60% of node memory on machines with less than 30 GB of memory, and at most 80% on larger machines.
+- 1 GiB hugepages are available only on some machine families, such as C3, C3D, C4, and M3.
+
+Karpenter does not validate these limits. Use NodePool requirements, such as `karpenter.k8s.gcp/instance-family` or `karpenter.k8s.gcp/instance-memory`, to limit the NodePool to machine types that can hold the configured pages.
+
+### Advertise hugepages to the scheduler
+
+Karpenter doesn't add the configured hugepages to instance type capacity, so a pending pod that requests hugepages doesn't trigger provisioning on its own. Create a `NodeOverlay` that adds the hugepages capacity to instance types in the NodePool. `NodeOverlay` is an Alpha feature; enable it with `controller.featureGates.nodeOverlay` (see [Settings](../settings.md#feature-gates)).
+
+```yaml
+apiVersion: karpenter.sh/v1alpha1
+kind: NodeOverlay
+metadata:
+  name: hugepages-example
+spec:
+  requirements:
+    - key: karpenter.sh/nodepool
+      operator: In
+      values:
+        - hugepages-example  # NodePool that references the hugepages GCENodeClass
+  capacity:
+    hugepages-2Mi: 8Gi  # hugepageSize2m × 2 MiB
+    hugepages-1Gi: 4Gi  # hugepageSize1g × 1 GiB
+```
+
+Set each capacity value to the total size of the pages in the GCENodeClass, so that the scheduler's view matches what the node allocates.
+
+Pods request hugepages in their resource requests and limits. Kubernetes doesn't overcommit hugepages, so a hugepages request must equal its limit:
+
+```yaml
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+    hugepages-2Mi: 1Gi
+  limits:
+    memory: 128Mi
+    hugepages-2Mi: 1Gi
+```
+
+See [`examples/nodeclass/hugepages-gcenodeclass.yaml`](https://github.com/cloudpilot-ai/karpenter-provider-gcp/blob/main/examples/nodeclass/hugepages-gcenodeclass.yaml) for a complete GCENodeClass and NodeOverlay, and [Manage HugePages](https://kubernetes.io/docs/tasks/manage-hugepages/scheduling-hugepages/) for how pods consume hugepages.
+
 ## Shielded VM
 
 Shielded VM provides verifiable integrity for your instances, protecting against boot-level and kernel-level malware. GCP organizations that enforce `constraints/compute.requireShieldedVm` require these settings on all instances. Without them, Karpenter-provisioned nodes fail with a `412 conditionNotMet` error.
@@ -174,6 +234,78 @@ Setting `confidentialInstanceType` enables Confidential VM with the named techno
 If the chosen machine type does not support the requested confidential type, GCE rejects the instance creation and the error surfaces on the `NodeClaim` `Launched` condition.
 
 The default `ContainerOptimizedOS` and `Ubuntu` images boot as Confidential VMs on supported families without any image change. GPU Confidential VMs are an exception: an A3 instance with an attached H100 GPU using Intel TDX requires a TDX-specific image (for example `cos-tdx-*`), which is not available through the `family` image selectors. Pin such an image by its full resource URL with `imageSelectorTerms[].id`; see the [GCP supported configurations](https://cloud.google.com/confidential-computing/confidential-vm/docs/supported-configurations#supported-images-gpu).
+
+## Nested virtualization
+
+Nested virtualization lets pods on the node run their own virtual machines, for example with KVM-based sandboxes or emulators.
+
+```yaml
+advancedMachineFeatures:
+  enableNestedVirtualization: true
+```
+
+Nested virtualization is only supported on Intel-based machine families, such as N1, N2, C2, C3 and C4. It is not available on E2, AMD (N2D, C2D, T2D), Arm (T2A, C4A) or Confidential VM instances. See the [GCP nested virtualization documentation](https://cloud.google.com/compute/docs/instances/nested-virtualization/overview) for the current list.
+
+GCE does not reject unsupported machine types: the instance starts normally and the setting is silently ignored. Restrict the NodePool to supported families so nodes that cannot run nested virtual machines are never provisioned:
+
+```yaml
+requirements:
+  - key: karpenter.k8s.gcp/instance-family
+    operator: In
+    values: ["n2", "c3", "c4"]
+```
+
+To confirm nested virtualization is active on a node, check that the `vmx` CPU flag is present (`grep -c vmx /proc/cpuinfo`) or that `/dev/kvm` exists.
+
+## Local SSDs
+
+[Local SSDs](https://cloud.google.com/compute/docs/disks/local-ssd) give nodes fast scratch storage. Their data is lost when the node stops, is preempted, or is deleted, so use them for caches and temporary data only.
+
+Set `spec.localSsdMode` to choose how workloads see the disks:
+
+- `RawBlock` (default) — unformatted NVMe block devices that your workload formats and mounts.
+- `Ephemeral` — the disks back the kubelet and container runtime storage, and their capacity is reported as the node's `ephemeral-storage`.
+
+```yaml
+localSsdMode: Ephemeral
+```
+
+`localSsdMode` does not set how many disks a node gets. The machine type decides that.
+
+**Fixed-count machine types**, such as `c4d-standard-8-lssd`, `z3-highmem-8-highlssd`, or `z4d-highmem-8-highlssd`, include a set number of local SSDs. Select the machine type and the disks are attached:
+
+```yaml
+nodeSelector:
+  node.kubernetes.io/instance-type: c4d-standard-8-lssd
+```
+
+**Configurable machine types** in the `n1`, `n2`, `n2d`, `c2`, and `c2d` families take a count through the `karpenter.k8s.gcp/instance-local-ssd-count` label. The NodePool must include the label, or Karpenter only launches these machine types without local SSDs:
+
+```yaml
+# NodePool
+requirements:
+  - key: karpenter.k8s.gcp/instance-local-ssd-count
+    operator: Exists
+```
+
+The NodePool and Pod requirements together must then select exactly one count. A Pod usually selects it alongside the machine type:
+
+```yaml
+# Pod
+nodeSelector:
+  node.kubernetes.io/instance-type: n2d-standard-8
+  karpenter.k8s.gcp/instance-local-ssd-count: "4"
+```
+
+If the requirements allow more than one count, Karpenter does not launch the node. The supported counts depend on the machine family and vCPU count; see the GCE [general-purpose](https://cloud.google.com/compute/docs/general-purpose-machines) and [compute-optimized](https://cloud.google.com/compute/docs/compute-optimized-machines) machine family pages.
+
+In `Ephemeral` mode, Karpenter checks a Pod's `ephemeral-storage` request against the capacity of the selected disks. Most machine types provide 375 GiB per disk. Z3 virtual machines provide 3,000 GiB, the Z3 bare-metal type `z3-highmem-192-highlssd-metal` provides 6,000 GiB, and Z4D provides 3,500 GiB. The request does not choose the count. In `RawBlock` mode, `ephemeral-storage` reflects only the boot disk.
+
+Z4D supports only Hyperdisk. If you set a boot disk `category`, choose a Hyperdisk type such as `hyperdisk-balanced`.
+
+Karpenter sets `scheduling.onHostMaintenance` to `MIGRATE` for on-demand Z3 and Z4D virtual machine (non-bare-metal) nodes, so they live-migrate during host maintenance. Compute Engine cannot live-migrate Z3 shapes with more than 18 TiB of bundled local SSD or Z4D shapes with more than 42,000 GiB. Karpenter sets `TERMINATE` for those shapes and for Spot nodes.
+
+If you are upgrading from a version that accepted `spec.disks[].category: local-ssd`, see [`MIGRATION.md`](https://github.com/cloudpilot-ai/karpenter-provider-gcp/blob/main/MIGRATION.md).
 
 ## Disk type scheduling
 
@@ -291,6 +423,45 @@ Common GCP instance labels:
 | `karpenter.k8s.gcp/instance-generation` | Machine type name | Parsed from standard machine family names; prefer `instance-family` when possible. |
 | `karpenter.k8s.gcp/instance-shape`      | Machine type name | Parsed from standard machine type names, for example `standard` or `highmem`.      |
 | `karpenter.k8s.gcp/instance-size`       | Machine type name | Parsed from standard machine type names.                                           |
+| `karpenter.k8s.gcp/instance-bare-metal` | Machine type name | `"true"` for names ending in `-metal`, otherwise `"false"`.                        |
+
+### Bare-metal selection
+
+To require VMs, add this requirement to a NodePool's `spec.template.spec.requirements`:
+
+```yaml
+- key: karpenter.k8s.gcp/instance-bare-metal
+  operator: In
+  values: ["false"]
+```
+
+To require bare metal instead:
+
+```yaml
+- key: karpenter.k8s.gcp/instance-bare-metal
+  operator: In
+  values: ["true"]
+```
+
+The label follows the Compute Engine `-metal` naming convention, including bundled-SSD names such as `c4-standard-288-lssd-metal`. No bare-metal API field is available. The label does not change default instance selection or guarantee compatibility with a NodeClass's configuration.
+
+Pods can select VMs with `nodeSelector`:
+
+```yaml
+spec:
+  nodeSelector:
+    karpenter.k8s.gcp/instance-bare-metal: "false"
+```
+
+Use `"true"` to select bare metal. A NodePool requirement constrains only that pool. To prohibit metal for a workload across pools, constrain the pod or every eligible pool.
+
+#### Adopting the label on existing nodes
+
+No configuration changes are required when upgrading. This label does not change instance selection or cause drift unless you add requirements that use it.
+
+The following caveats apply only when adopting the new label on an existing pool. Existing Nodes and NodeClaims do not receive this label automatically. `In ["false"]` rejects unlabeled legacy nodes, including VMs. Adding it to a NodePool marks those NodeClaims as drifted, subject to disruption controls. Pods that explicitly select this label cannot use unlabeled existing Nodes. Karpenter may provision a new matching node even when those existing Nodes have spare capacity.
+
+### Machine-family selection
 
 For example, use `nodeAffinity` when a workload can run on any of several machine families:
 

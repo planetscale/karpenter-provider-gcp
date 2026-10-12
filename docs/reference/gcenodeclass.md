@@ -28,6 +28,22 @@ _Appears in:_
 | `subnetwork` _string_ | Subnetwork is the subnetwork for this interface. Required. |  | MinLength: 1 <br /> |
 
 
+#### AdvancedMachineFeatures
+
+
+
+AdvancedMachineFeatures defines advanced CPU and virtualisation options for a GCE instance.
+
+
+
+_Appears in:_
+- [GCENodeClassSpec](#gcenodeclassspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enableNestedVirtualization` _boolean_ | EnableNestedVirtualization defines whether the instance can run nested virtual machines.<br />Only supported on Intel-based machine families; not supported on E2, AMD, Arm or<br />Confidential VM instances. |  | Optional: \{\} <br /> |
+
+
 
 
 #### Disk
@@ -68,6 +84,88 @@ _Appears in:_
 
 
 
+#### GCECustomMachineType
+
+
+
+GCECustomMachineType registers a GCE custom machine type so the instance type provider can
+discover it, price it, and make it available for scheduling like any predefined shape. See
+proposals/0009-custom-machine-type-catalog.md.
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `kind` _string_ | Kind is a string value representing the REST resource this object represents.<br />Servers may infer this from the endpoint the client submits requests to.<br />Cannot be updated.<br />In CamelCase.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds |  | Optional: \{\} <br /> |
+| `apiVersion` _string_ | APIVersion defines the versioned schema of this representation of an object.<br />Servers should convert recognized schemas to the latest internal value, and<br />may reject unrecognized values.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources |  | Optional: \{\} <br /> |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[GCECustomMachineTypeSpec](#gcecustommachinetypespec)_ |  |  |  |
+| `status` _[GCECustomMachineTypeStatus](#gcecustommachinetypestatus)_ |  |  |  |
+
+
+
+
+#### GCECustomMachineTypePrices
+
+
+
+GCECustomMachineTypePrices are decimal-string USD/hour prices, matching the currency
+representation used at other API boundaries in this codebase to avoid float precision
+issues over the wire.
+
+
+
+_Appears in:_
+- [GCECustomMachineTypeSpec](#gcecustommachinetypespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `onDemand` _string_ | OnDemand is the on-demand hourly price in USD. |  | Pattern: `^[0-9]+(\.[0-9]+)?$` <br />Required: \{\} <br /> |
+| `spot` _string_ | Spot is the Spot hourly price in USD. |  | Pattern: `^[0-9]+(\.[0-9]+)?$` <br />Required: \{\} <br /> |
+
+
+#### GCECustomMachineTypeSpec
+
+
+
+GCECustomMachineTypeSpec registers a GCE custom machine type (e.g. n2-custom-8-24576) so it
+joins the instance type catalog alongside predefined shapes. GCP does not enumerate custom
+shapes through machineTypes.aggregatedList (the API Karpenter otherwise uses to discover
+instance types), so a shape must be registered here before it can be scheduled onto.
+
+
+
+_Appears in:_
+- [GCECustomMachineType](#gcecustommachinetype)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `machineType` _string_ | MachineType is the real GCE custom machine type name, e.g. "n2-custom-8-24576". Immutable<br />after creation; create a new object to register a different shape. |  | Pattern: `^[a-z][a-z0-9]*-custom-[1-9][0-9]*-[1-9][0-9]*(-ext)?$` <br />Required: \{\} <br /> |
+| `prices` _[GCECustomMachineTypePrices](#gcecustommachinetypeprices)_ | Prices are the hourly prices Karpenter uses for scheduling and consolidation decisions.<br />GCP does not publish prices for custom shapes (unlike predefined ones), so they must be<br />supplied explicitly until the pricing provider can compute them (see proposals/0009). |  | Required: \{\} <br /> |
+
+
+#### GCECustomMachineTypeStatus
+
+
+
+GCECustomMachineTypeStatus contains the resolved state of the GCECustomMachineType, as
+discovered from GCE via machineTypes.get (which, unlike machineTypes.aggregatedList,
+supports resolving a specific valid custom shape on demand).
+
+
+
+_Appears in:_
+- [GCECustomMachineType](#gcecustommachinetype)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `guestCpus` _integer_ | GuestCpus is the resolved vCPU count for MachineType. |  | Optional: \{\} <br /> |
+| `memoryMb` _integer_ | MemoryMb is the resolved memory, in MB, for MachineType. |  | Optional: \{\} <br /> |
+| `zones` _string array_ | Zones lists the cluster zones where MachineType was confirmed available. |  | Optional: \{\} <br /> |
+| `conditions` _Condition array_ | Conditions contains signals for health and readiness. |  | Optional: \{\} <br /> |
+
+
 #### GCENodeClass
 
 
@@ -106,13 +204,16 @@ _Appears in:_
 | `disks` _[Disk](#disk) array_ | Disk defines the disks to attach to the provisioned instance. |  | MaxItems: 10 <br />Optional: \{\} <br /> |
 | `imageSelectorTerms` _[ImageSelectorTerm](#imageselectorterm) array_ | ImageSelectorTerms is a list of or image selector terms. The terms are ORed. |  | MaxItems: 30 <br />MinItems: 1 <br />Required: \{\} <br /> |
 | `imageFamily` _string_ | ImageFamily dictates the instance template used when generating launch templates.<br />If no ImageSelectorTerms alias is specified, this field is required. |  | Enum: [Ubuntu ContainerOptimizedOS] <br />Optional: \{\} <br /> |
-| `subnetRangeName` _string_ | SubnetRangeName is the name of the subnetwork secondary IPv4 range from which<br />to allocate pod IP addresses (alias IPs for pods). If not specified, the cluster's<br />default pod secondary range (ClusterSecondaryRangeName from the cluster's IP<br />allocation policy) is used. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z]([-a-z0-9]\{0,61\}[a-z0-9])?$` <br />Optional: \{\} <br /> |
+| `subnetRangeName` _string_ | SubnetRangeName is the name of the subnetwork secondary IPv4 range from which<br />to allocate pod IP addresses (alias IPs for pods). When set, only this range is<br />considered. Mutually exclusive with subnetRangeNames. If neither field is set,<br />the cluster's default and additional pod ranges on its primary subnetwork are used.<br />Deprecated: use SubnetRangeNames with a single entry instead. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z]([-a-z0-9]\{0,61\}[a-z0-9])?$` <br />Optional: \{\} <br /> |
+| `subnetRangeNames` _string array_ | SubnetRangeNames is a list of subnetwork secondary IPv4 range names from which<br />to allocate pod IP addresses (alias IPs for pods). When more than one name is<br />listed, the provider prefers the range with the most Compute-reported free IPv4 addresses<br />at launch. Mutually exclusive with subnetRangeName. When set, this list replaces<br />the cluster defaults completely. If neither field is set, the cluster's default<br />and additional pod ranges on its primary subnetwork are used. |  | MaxItems: 16 <br />MinItems: 1 <br />items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z]([-a-z0-9]\{0,61\}[a-z0-9])?$` <br />Optional: \{\} <br /> |
 | `kubeletConfiguration` _[KubeletConfiguration](#kubeletconfiguration)_ | KubeletConfiguration defines args to be used when configuring kubelet on provisioned nodes.<br />They are a vswitch of the upstream types, recognizing not all options may be supported.<br />Wherever possible, the types and names should reflect the upstream kubelet types. |  | Optional: \{\} <br /> |
 | `linuxNodeConfig` _[LinuxNodeConfig](#linuxnodeconfig)_ | LinuxNodeConfig configures the Linux kernel of provisioned nodes.<br />Mirrors GKE node pool linux_node_config. |  | Optional: \{\} <br /> |
-| `labels` _object (keys:string, values:string)_ | Labels to be applied on GCE VM instance. |  | MaxProperties: 20 <br />Optional: \{\} <br /> |
+| `labels` _object (keys:string, values:string)_ | Labels to be applied on the GCE VM instance and its persistent disks.<br />Local SSD scratch disks do not support labels. |  | MaxProperties: 20 <br />Optional: \{\} <br /> |
 | `metadata` _object (keys:string, values:string)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
 | `networkTags` _[NetworkTag](#networktag) array_ | NetworkTags is a list of network tags to apply to the node. |  | MaxItems: 20 <br />MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z]([-a-z0-9]\{0,61\}[a-z0-9])?$` <br />Optional: \{\} <br /> |
+| `resourceManagerTags` _object (keys:string, values:[ResourceManagerTagValue](#resourcemanagertagvalue))_ | ResourceManagerTags are GCP resource manager (secure) tags bound to the instance<br />at creation. Unlike network tags, binding them is IAM-controlled, so they can be<br />used as targets in network firewall policies, IAM conditions and organization policies.<br />Keys are `tagKeys/\{tag_key_id\}` or `\{org_id\|project_id\}/\{tag_key_short_name\}`; values are<br />`tagValues/\{tag_value_id\}` or `\{tag_value_short_name\}`. Mirrors GKE node pool<br />resource_manager_tags. The Karpenter service account needs roles/resourcemanager.tagUser<br />on the tag values. |  | MaxProperties: 50 <br />Optional: \{\} <br /> |
 | `shieldedInstanceConfig` _[ShieldedInstanceConfig](#shieldedinstanceconfig)_ | ShieldedInstanceConfig enables Shielded VM for provisioned nodes: Secure Boot,<br />virtual TPM, and integrity monitoring. |  | Optional: \{\} <br /> |
+| `advancedMachineFeatures` _[AdvancedMachineFeatures](#advancedmachinefeatures)_ | AdvancedMachineFeatures configures advanced CPU and virtualisation options for provisioned nodes. |  | Optional: \{\} <br /> |
 | `confidentialInstanceType` _string_ | ConfidentialInstanceType enables Confidential VM for provisioned nodes using the<br />named technology (AMD SEV / SEV-SNP or Intel TDX), providing in-use memory<br />encryption. Leave unset to disable. Only supported on specific machine families. |  | Enum: [SEV SEV_SNP TDX] <br />Optional: \{\} <br /> |
 | `networkConfig` _[NetworkConfig](#networkconfig)_ | NetworkConfig allows overriding per-interface network settings for provisioned nodes. |  | Optional: \{\} <br /> |
 | `autoGPUTaint` _boolean_ | AutoGPUTaint, when true, automatically applies nvidia.com/gpu=present:NoSchedule<br />to any GPU node at provisioning time, regardless of the NodePool configuration.<br />Disabled by default to preserve backward compatibility. |  | Optional: \{\} <br /> |
@@ -135,6 +236,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `images` _[Image](#image) array_ | Image contains the current image that are available to the<br />cluster under the Image selectors. |  | Optional: \{\} <br /> |
+| `subnetRanges` _[SubnetRangeStatus](#subnetrangestatus) array_ | SubnetRanges contains the pod secondary IPv4 ranges considered for launch<br />and their Compute-reported free IPv4 address counts when known. |  | Optional: \{\} <br /> |
 | `conditions` _Condition array_ | Conditions contains signals for health and readiness |  | Optional: \{\} <br /> |
 
 
@@ -314,6 +416,23 @@ _Appears in:_
 
 
 
+#### ResourceManagerTagValue
+
+_Underlying type:_ _string_
+
+ResourceManagerTagValue is a resource manager tag value, either `tagValues/{tag_value_id}`
+or a `{tag_value_short_name}` under a namespaced key.
+
+_Validation:_
+- MaxLength: 63
+- MinLength: 1
+- Pattern: `^(tagValues/[0-9]+|[^/]+)$`
+
+_Appears in:_
+- [GCENodeClassSpec](#gcenodeclassspec)
+
+
+
 #### SecondaryBootDiskMode
 
 _Underlying type:_ _string_
@@ -344,5 +463,22 @@ _Appears in:_
 | `enableSecureBoot` _boolean_ | EnableSecureBoot defines whether the instance has Secure Boot enabled. |  | Optional: \{\} <br /> |
 | `enableVtpm` _boolean_ | EnableVtpm defines whether the instance has the vTPM enabled. |  | Optional: \{\} <br /> |
 | `enableIntegrityMonitoring` _boolean_ | EnableIntegrityMonitoring defines whether the instance has integrity monitoring enabled. |  | Optional: \{\} <br /> |
+
+
+#### SubnetRangeStatus
+
+
+
+SubnetRangeStatus is a resolved pod secondary range considered for node launch.
+
+
+
+_Appears in:_
+- [GCENodeClassStatus](#gcenodeclassstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name is the subnetwork secondary IPv4 range name. |  | Required: \{\} <br /> |
+| `totalFreeIP` _integer_ | TotalFreeIP is the Compute-reported number of free IPv4 addresses in this<br />secondary range. Omitted when unknown; zero means no free addresses were reported.<br />Counts are snapshots, not a guarantee of an allocatable contiguous pod CIDR block. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 
 
