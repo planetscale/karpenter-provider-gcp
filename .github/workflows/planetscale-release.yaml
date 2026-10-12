@@ -39,16 +39,17 @@ jobs:
           version="$(git describe --tags --always | sed 's/^v//')"
           tags="sha-${source_sha}"
 
-          # Add a <ref>-<short-sha> tag unless the input was itself a commit SHA.
+          # Add a dated branch/ref tag unless the input was itself a commit SHA.
           if [[ ! "${SOURCE_REF}" =~ ^[0-9a-f]{7,40}$ || "${source_sha}" != "${SOURCE_REF}"* ]]; then
+            tag_date="$(date -u +'%Y-%m-%d')"
             ref="${SOURCE_REF#refs/heads/}"
             ref="${ref#refs/tags/}"
             # Docker tags allow [a-z0-9._-], must start with [a-z0-9_], and max out at 128 chars.
             ref="$(printf '%s' "${ref}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g; s/-+/-/g; s/^[.-]+//')"
-            ref="${ref:0:$((128 - 1 - ${#short_sha}))}"
+            ref="${ref:0:$((128 - 2 - ${#tag_date} - ${#short_sha}))}"
             ref="$(printf '%s' "${ref}" | sed -E 's/[.-]+$//')"
             if [[ -n "${ref}" ]]; then
-              tags="${tags},${ref}-${short_sha}"
+              tags="${tags},${ref}-${tag_date}-${short_sha}"
             fi
           fi
 
