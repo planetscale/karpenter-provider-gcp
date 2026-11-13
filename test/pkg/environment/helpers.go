@@ -49,6 +49,10 @@ import (
 
 const (
 	e2eOwnerLabel = "karpenter-e2e/owned"
+	// E2EOwnerLabel marks objects the suite creates directly, so a leftover pod
+	// or workload is attributed to the suite the same way as the NodeClasses and
+	// NodePools the helpers create.
+	E2EOwnerLabel = e2eOwnerLabel
 
 	// DefaultE2EDiskGiB is the boot disk size for test nodes; 30 GiB meets the
 	// minimum required by ContainerOptimizedOS while keeping costs low.
@@ -208,31 +212,40 @@ func (e *Environment) CreateNodeClassForLocalSSD(
 // kubeletConfig is a map[string]any whose keys must match the JSON field
 // names on v1alpha1.KubeletConfiguration (systemReserved, kubeReserved,
 // evictionHard, podsPerCore, etc.). Used by e2e tests verifying issue
-// #398 (kubelet honors user reservations).
+// #398 (kubelet honors user reservations). spec.linuxNodeConfig is set too
+// when linuxNodeConfig is not nil; its keys must match the JSON field names
+// on v1alpha1.LinuxNodeConfig.
+//
+// bootDiskGiB 0 omits spec.disks, so the node class has to rely on the
+// provider's own boot disk, and a nil kubeletConfig omits
+// spec.kubeletConfiguration, so the provider's kubelet defaults apply.
 func (e *Environment) CreateNodeClassWithKubeletConfig(
 	ctx context.Context,
 	name, imageFamily string,
-	kubeletConfig map[string]any,
+	bootDiskGiB int64,
+	kubeletConfig, linuxNodeConfig map[string]any,
 ) {
-	diskGiB := int64(DefaultE2EDiskGiB)
-	if imageFamily == gcpv1alpha1.ImageFamilyUbuntu {
-		diskGiB = 50
-	}
 	deleteIfExists(ctx, e.DynamicClient, gceNodeClassGVR, name)
+	spec := map[string]any{
+		"imageSelectorTerms": []any{
+			map[string]any{"alias": imageFamily + "@latest"},
+		},
+		"subnetRangeName": e.PodsRangeName,
+	}
+	if bootDiskGiB > 0 {
+		spec["disks"] = []any{map[string]any{"sizeGiB": bootDiskGiB, "boot": true}}
+	}
+	if kubeletConfig != nil {
+		spec["kubeletConfiguration"] = kubeletConfig
+	}
+	if linuxNodeConfig != nil {
+		spec["linuxNodeConfig"] = linuxNodeConfig
+	}
 	obj := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "karpenter.k8s.gcp/v1alpha1",
 		"kind":       "GCENodeClass",
 		"metadata":   map[string]any{"name": name, "labels": map[string]any{e2eOwnerLabel: "true"}},
-		"spec": map[string]any{
-			"imageSelectorTerms": []any{
-				map[string]any{"alias": imageFamily + "@latest"},
-			},
-			"disks": []any{
-				map[string]any{"sizeGiB": diskGiB, "boot": true},
-			},
-			"subnetRangeName":      e.PodsRangeName,
-			"kubeletConfiguration": kubeletConfig,
-		},
+		"spec":       spec,
 	}}
 	_, err := e.DynamicClient.Resource(gceNodeClassGVR).Create(ctx, obj, metav1.CreateOptions{})
 	Expect(err).NotTo(HaveOccurred(), "creating GCENodeClass %s", name)
@@ -375,6 +388,106 @@ func (e *Environment) CreateNodeClassWithNestedVirtualization(ctx context.Contex
 	e.trackNodeClass(name)
 }
 
+// CreateNodeClassWithThreadsPerCore creates a GCENodeClass with
+// advancedMachineFeatures.threadsPerCore and kubeletConfiguration.podsPerCore
+// set. podsPerCore makes the node's pod limit depend on the CPU count the
+// kubelet reports, so it checks that count end to end. Used by threads-per-core
+// e2e tests.
+func (e *Environment) CreateNodeClassWithThreadsPerCore(ctx context.Context, name string, threadsPerCore, podsPerCore int64) {
+	deleteIfExists(ctx, e.DynamicClient, gceNodeClassGVR, name)
+	obj := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "karpenter.k8s.gcp/v1alpha1",
+		"kind":       "GCENodeClass",
+		"metadata":   map[string]any{"name": name, "labels": map[string]any{e2eOwnerLabel: "true"}},
+		"spec": map[string]any{
+			"advancedMachineFeatures": map[string]any{
+				"threadsPerCore": threadsPerCore,
+			},
+			"kubeletConfiguration": map[string]any{
+				"podsPerCore": podsPerCore,
+			},
+			"imageSelectorTerms": []any{
+				map[string]any{"alias": "ContainerOptimizedOS@latest"},
+			},
+			"disks": []any{
+				map[string]any{"sizeGiB": int64(DefaultE2EDiskGiB), "boot": true},
+			},
+			"subnetRangeName": e.PodsRangeName,
+		},
+	}}
+	_, err := e.DynamicClient.Resource(gceNodeClassGVR).Create(ctx, obj, metav1.CreateOptions{})
+	Expect(err).NotTo(HaveOccurred(), "creating GCENodeClass %s", name)
+	e.trackNodeClass(name)
+}
+
+// GetNodeClaimForNode returns the NodeClaim whose status.nodeName is nodeName.
+func (e *Environment) GetNodeClaimForNode(ctx context.Context, nodeName string) (*unstructured.Unstructured, error) {
+	claims, err := e.ListNodeClaims(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range claims {
+		if got, _, _ := unstructured.NestedString(claims[i].Object, "status", "nodeName"); got == nodeName {
+			return &claims[i], nil
+		}
+	}
+	return nil, fmt.Errorf("no NodeClaim for node %s", nodeName)
+}
+
+// CreateNodeClassWithGvnicAndMinCpuPlatform creates a GCENodeClass with
+// spec.gvnic.enabled and spec.minCpuPlatform set for instance-config e2e tests.
+func (e *Environment) CreateNodeClassWithGvnicAndMinCpuPlatform(ctx context.Context, name string, enabled bool, minCpuPlatform string) {
+	deleteIfExists(ctx, e.DynamicClient, gceNodeClassGVR, name)
+	obj := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "karpenter.k8s.gcp/v1alpha1",
+		"kind":       "GCENodeClass",
+		"metadata":   map[string]any{"name": name, "labels": map[string]any{e2eOwnerLabel: "true"}},
+		"spec": map[string]any{
+			"minCpuPlatform": minCpuPlatform,
+			"gvnic": map[string]any{
+				"enabled": enabled,
+			},
+			"imageSelectorTerms": []any{
+				map[string]any{"alias": "ContainerOptimizedOS@latest"},
+			},
+			"disks": []any{
+				map[string]any{"sizeGiB": int64(DefaultE2EDiskGiB), "boot": true},
+			},
+			"subnetRangeName": e.PodsRangeName,
+		},
+	}}
+	_, err := e.DynamicClient.Resource(gceNodeClassGVR).Create(ctx, obj, metav1.CreateOptions{})
+	Expect(err).NotTo(HaveOccurred(), "creating GCENodeClass %s", name)
+	e.trackNodeClass(name)
+}
+
+// CreateNodeClassWithNamedDataDisks creates a GCENodeClass with a pd-balanced
+// boot disk plus one blank pd-balanced data disk per entry in deviceNames.
+func (e *Environment) CreateNodeClassWithNamedDataDisks(ctx context.Context, name string, dataDiskGiB int64, deviceNames []string) {
+	deleteIfExists(ctx, e.DynamicClient, gceNodeClassGVR, name)
+	disks := []any{
+		map[string]any{"category": "pd-balanced", "sizeGiB": int64(DefaultE2EDiskGiB), "boot": true},
+	}
+	for _, deviceName := range deviceNames {
+		disks = append(disks, map[string]any{"category": "pd-balanced", "sizeGiB": dataDiskGiB, "deviceName": deviceName})
+	}
+	obj := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "karpenter.k8s.gcp/v1alpha1",
+		"kind":       "GCENodeClass",
+		"metadata":   map[string]any{"name": name, "labels": map[string]any{e2eOwnerLabel: "true"}},
+		"spec": map[string]any{
+			"imageSelectorTerms": []any{
+				map[string]any{"alias": "ContainerOptimizedOS@latest"},
+			},
+			"disks":           disks,
+			"subnetRangeName": e.PodsRangeName,
+		},
+	}}
+	_, err := e.DynamicClient.Resource(gceNodeClassGVR).Create(ctx, obj, metav1.CreateOptions{})
+	Expect(err).NotTo(HaveOccurred(), "creating GCENodeClass %s", name)
+	e.trackNodeClass(name)
+}
+
 // CreateNodeClassWithPrivateNetwork creates a GCENodeClass identical to
 // CreateNodeClass but with networkConfig.enablePrivateNodes set to true,
 // so Karpenter provisions nodes with no external (public) IP.
@@ -404,7 +517,7 @@ func (e *Environment) CreateNodeClassWithPrivateNetwork(ctx context.Context, nam
 
 // CreateNodeClassWithAutoGPUTaint creates a GCENodeClass with autoGPUTaint: true
 // and the GKE GPU driver auto-install label set. Used by GPU e2e tests.
-func (e *Environment) CreateNodeClassWithAutoGPUTaint(ctx context.Context, name, gpuDriverVersion string) {
+func (e *Environment) CreateNodeClassWithAutoGPUTaint(ctx context.Context, name, gpuDriverVersion string, gpuSharingConfig *gcpv1alpha1.GPUSharingConfig) {
 	deleteIfExists(ctx, e.DynamicClient, gceNodeClassGVR, name)
 	obj := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "karpenter.k8s.gcp/v1alpha1",
@@ -422,16 +535,27 @@ func (e *Environment) CreateNodeClassWithAutoGPUTaint(ctx context.Context, name,
 			"subnetRangeName": e.PodsRangeName,
 		},
 	}}
+	if gpuSharingConfig != nil {
+		Expect(unstructured.SetNestedMap(obj.Object, map[string]any{
+			"strategy":               string(gpuSharingConfig.Strategy),
+			"maxSharedClientsPerGPU": int64(gpuSharingConfig.MaxSharedClientsPerGPU),
+		}, "spec", "gpuSharingConfig")).To(Succeed())
+	}
 	_, err := e.DynamicClient.Resource(gceNodeClassGVR).Create(ctx, obj, metav1.CreateOptions{})
 	Expect(err).NotTo(HaveOccurred(), "creating GCENodeClass %s", name)
 	e.trackNodeClass(name)
 }
 
-// CreateDeploymentOnGPUNode creates a single-replica Deployment that requests
+// CreateDeploymentOnGPUNode creates a Deployment whose pods each request
 // one nvidia.com/gpu resource, ensuring the pod only schedules once the NVIDIA
 // device plugin has registered the GPU as allocatable (driver installed + plugin running).
-func (e *Environment) CreateDeploymentOnGPUNode(ctx context.Context, name, appLabel, nodePoolName string) {
-	replicas := int32(1)
+func (e *Environment) CreateDeploymentOnGPUNode(ctx context.Context, name, appLabel, nodePoolName string, replicas int32, nodeSelector map[string]string) {
+	selectors := map[string]string{}
+	for key, value := range nodeSelector {
+		selectors[key] = value
+	}
+	selectors[karpv1.NodePoolLabelKey] = nodePoolName
+	nodeSelector = selectors
 	zero := int64(0)
 	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: TestNamespace},
@@ -441,7 +565,7 @@ func (e *Environment) CreateDeploymentOnGPUNode(ctx context.Context, name, appLa
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": appLabel}},
 				Spec: corev1.PodSpec{
-					NodeSelector:                  map[string]string{karpv1.NodePoolLabelKey: nodePoolName},
+					NodeSelector:                  nodeSelector,
 					TerminationGracePeriodSeconds: &zero,
 					Tolerations: []corev1.Toleration{
 						{
@@ -1201,19 +1325,44 @@ func (e *Environment) WaitForNodeClaimInitialized(ctx context.Context, nodePoolN
 	}).WithTimeout(GPUProvisioningTimeout).WithPolling(DefaultPollInterval).Should(Succeed())
 }
 
-// WaitForKubeProxyRunning polls until exactly one kube-proxy pod exists on the
-// given node, is Running/Ready, and resolves to an image matching the node arch.
-// GKE can expose kube-proxy as either a node-owned static/mirror pod
-// (component=kube-proxy) or an addonmanager-managed DaemonSet pod
-// (k8s-app=kube-proxy); a Karpenter node must not run both.
-func (e *Environment) WaitForKubeProxyRunning(ctx context.Context, nodeName string) {
+// dataplaneV2DatapathProvider is the GKE NetworkConfig.datapathProvider value
+// for Dataplane V2 clusters. GKE reports LEGACY_DATAPATH or omits the field on
+// clusters that still route Services with kube-proxy.
+const dataplaneV2DatapathProvider = "ADVANCED_DATAPATH"
+
+// WaitForDatapathAgentRunning polls until the networking agent the cluster's
+// datapath requires is Running/Ready on the given node.
+//
+// Dataplane V1 (iptables) uses kube-proxy. GKE exposes it as either a
+// node-owned static/mirror pod (component=kube-proxy) or an
+// addonmanager-managed DaemonSet pod (k8s-app=kube-proxy); a Karpenter node
+// must not run both.
+//
+// Dataplane V2 (Cilium/eBPF) removes kube-proxy entirely: the anetd DaemonSet
+// (k8s-app=cilium) routes Services instead, so a Karpenter node must run
+// exactly one cilium agent. Its image tag carries no architecture, so only
+// presence and readiness are asserted for it.
+func (e *Environment) WaitForDatapathAgentRunning(ctx context.Context, nodeName string) {
+	dataplaneV2 := e.usesDataplaneV2(ctx)
+
 	Eventually(func(g Gomega) {
+		fieldSelector := fmt.Sprintf("spec.nodeName=%s", nodeName)
+
+		if dataplaneV2 {
+			agentPods := e.daemonSetPodsOnNode(ctx, g, nodeName, "k8s-app=cilium", fieldSelector)
+			g.Expect(agentPods).To(HaveLen(1),
+				"expected exactly one cilium agent pod on node %s, got %v", nodeName, podNames(agentPods))
+			g.Expect(isRunningAndReady(&agentPods[0])).To(BeTrue(),
+				"cilium agent pod %s on %s is not Running/Ready (phase=%s)",
+				agentPods[0].Name, nodeName, agentPods[0].Status.Phase)
+			return
+		}
+
 		node, err := e.KubeClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
 		g.Expect(err).NotTo(HaveOccurred(), "getting node %s", nodeName)
 		arch := node.Labels[corev1.LabelArchStable]
 		g.Expect(arch).NotTo(BeEmpty(), "node %s has no %s label", nodeName, corev1.LabelArchStable)
 
-		fieldSelector := fmt.Sprintf("spec.nodeName=%s", nodeName)
 		staticPods, err := e.KubeClient.CoreV1().Pods("kube-system").List(ctx, metav1.ListOptions{
 			LabelSelector: "component=kube-proxy",
 			FieldSelector: fieldSelector,
@@ -1238,6 +1387,38 @@ func (e *Environment) WaitForKubeProxyRunning(ctx context.Context, nodeName stri
 			"kube-proxy pod %s on %s has images %s that do not match arch %s",
 			pod.Name, nodeName, kubeProxyImages(&pod), arch)
 	}).WithTimeout(ProvisioningTimeout).WithPolling(DefaultPollInterval).Should(Succeed())
+}
+
+// usesDataplaneV2 reports whether the cluster runs GKE Dataplane V2.
+func (e *Environment) usesDataplaneV2(ctx context.Context) bool {
+	cluster, err := e.GetCluster(ctx)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "getting the cluster to read its datapath")
+	if cluster.NetworkConfig == nil {
+		return false
+	}
+	return cluster.NetworkConfig.DatapathProvider == dataplaneV2DatapathProvider
+}
+
+// daemonSetPodsOnNode lists pods matching the labels on the given node, keeping
+// only DaemonSet-owned ones so a controller for the same component, which could
+// be scheduled onto a Karpenter node, cannot be mistaken for the per-node agent.
+func (e *Environment) daemonSetPodsOnNode(ctx context.Context, g Gomega, nodeName, labelSelector, fieldSelector string) []corev1.Pod {
+	pods, err := e.KubeClient.CoreV1().Pods("kube-system").List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+		FieldSelector: fieldSelector,
+	})
+	g.Expect(err).NotTo(HaveOccurred(), "listing %s pods on node %s", labelSelector, nodeName)
+
+	var agents []corev1.Pod
+	for _, pod := range pods.Items {
+		for _, owner := range pod.OwnerReferences {
+			if owner.Kind == "DaemonSet" {
+				agents = append(agents, pod)
+				break
+			}
+		}
+	}
+	return agents
 }
 
 func kubeProxyImageMatchesArch(pod *corev1.Pod, arch string) bool {
@@ -1534,7 +1715,7 @@ func (e *Environment) ResolveCurrentUbuntuVersion(ctx context.Context) string {
 	Expect(listErr).NotTo(HaveOccurred(), "listing Ubuntu images in ubuntu-os-gke-cloud")
 	Expect(best).NotTo(BeNil(), "no Ubuntu image found for K8s version %s", serverVer.GitVersion)
 
-	versionRe := regexp.MustCompile(`-v(\d{8})`)
+	versionRe := regexp.MustCompile(`-v(\d{8}[a-z]?)`)
 	m := versionRe.FindStringSubmatch(best.Name)
 	Expect(m).To(HaveLen(2), "could not extract Ubuntu version from %q", best.Name)
 	version := "v" + m[1]

@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request: {}
+
+permissions:
+  contents: read
+
+jobs:
+  presubmit:
+    name: Lint and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          submodules: true
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select Go toolchain
+        id: go-toolchain
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Restore Go CI cache
+        id: setup-go
+        uses: cloudx-io/setup-go@main
+        with:
+          go-version: "${{ steps.go-toolchain.outputs.go-version }}"
+          cache-key-prefix: ${{ github.job }}
+          cache-dependency-path: '**/go.*'
+          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      - name: Install toolchain
+        run: make toolchain
+
+      - name: Restore lint analysis cache
+        id: lint-cache
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: ${{ runner.temp }}/golangci-lint
+          key: lint-v2.15.0-go-${{ runner.os }}-${{ runner.arch }}-${{ steps.go-toolchain.outputs.go-version }}-${{ hashFiles('**/go.*', '**/vendor/modules.txt') }}-${{ hashFiles('.golangci*') }}-${{ github.sha }}
+          restore-keys: lint-v2.15.0-go-${{ runner.os }}-${{ runner.arch }}-${{ steps.go-toolchain.outputs.go-version }}-${{ hashFiles('**/go.*', '**/vendor/modules.txt') }}-${{ hashFiles('.golangci*') }}-
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v9.3.0
+        env:
+          GOLANGCI_LINT_CACHE: ${{ runner.temp }}/golangci-lint
+        with:
+          skip-cache: true
+          version: v2.15.0
+          only-new-issues: true
+
+      - name: Verify
+        run: make ci
+
+      - name: Save lint analysis cache
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.lint-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: ${{ runner.temp }}/golangci-lint
+          key: ${{ steps.lint-cache.outputs.cache-primary-key }}

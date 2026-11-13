@@ -25,6 +25,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/api/compute/v1"
+
+	"github.com/cloudpilot-ai/karpenter-provider-gcp/pkg/apis/v1alpha1"
 )
 
 func TestSelectImage_Ubuntu_SkipsPending(t *testing.T) {
@@ -174,11 +176,52 @@ func TestResolveImages_Ubuntu_PinnedVersion_PendingArm64(t *testing.T) {
 	p := &Ubuntu{computeService: buildComputeService(t, srv), release: "2404"}
 	_, err := p.ResolveImages(context.Background(), "v20260416")
 	require.Error(t, err)
+	// Ubuntu discovery only admits READY images, so a catalog-PENDING sibling leaves the required
+	// arm64 architecture unresolved: that is a configuration-shaped resolution failure, unlike a
+	// listed READY image that turns out to be PENDING on lookup (TestAliasTerm_UbuntuUnreadySiblingStillFailsResolution).
+	require.True(t, IsImageResolutionError(err), "expected an imageResolutionError, got %v", err)
+	require.False(t, IsImageUnavailableError(err))
+}
+
+// Ubuntu completeness is unchanged by the COS partial-set policy: an arm64 image that stops
+// being READY after it was listed must fail resolution, not publish an amd64-only set.
+func TestAliasTerm_UbuntuUnreadySiblingStillFailsResolution(t *testing.T) {
+	const (
+		amd64 = "ubuntu-gke-2404-1-35-amd64-v20260416"
+		arm64 = "ubuntu-gke-2404-1-35-arm64-v20260416"
+	)
+	catalog := &imageCatalog{
+		pages: [][]*compute.Image{{
+			{Name: amd64, Status: "READY"},
+			{Name: arm64, Status: "READY"},
+		}},
+		lookup: func(name string) (*compute.Image, int) {
+			if name == arm64 {
+				return &compute.Image{Name: arm64, Status: "PENDING"}, 0
+			}
+			return nil, 0
+		},
+	}
+	srv := imageCatalogServer(t, catalog)
+	defer srv.Close()
+
+	p := NewDefaultProvider(buildComputeService(t, srv), &fakeVersionProvider{version: "v1.35.1"}, &stubGKEProvider{})
+	nc := &v1alpha1.GCENodeClass{Spec: v1alpha1.GCENodeClassSpec{
+		ImageSelectorTerms: []v1alpha1.ImageSelectorTerm{{Alias: "Ubuntu2404@latest"}},
+	}}
+
+	_, err := p.List(context.Background(), nc)
+	require.ErrorContains(t, err, "PENDING")
+	require.False(t, IsImageResolutionError(err))
+	require.True(t, IsImageUnavailableError(err), "a pending Ubuntu sibling is a publication lag, not a configuration or API failure: %v", err)
 }
 
 func TestResolveImages_Ubuntu_PinnedVersion_InvalidFormat(t *testing.T) {
 	p := &Ubuntu{}
-	for _, version := range []string{"20260416", "v202604161", "v2026041", "vABCDEFGH", "v20260416-extra"} {
+	for _, version := range []string{
+		"20260416", "v202604161", "v2026041", "vABCDEFGH", "v20260416-extra",
+		"v20251218ab", "v20251218A", "v20251218-a", "v20251218_a", "va20251218", "20251218a", "v2025121a",
+	} {
 		_, err := p.ResolveImages(context.Background(), version)
 		require.Errorf(t, err, "expected error for version %q", version)
 		require.Contains(t, err.Error(), "invalid Ubuntu version", "version %q", version)
@@ -405,4 +448,120 @@ func TestSelectImage_Ubuntu2204_PicksAmd64NotArm64(t *testing.T) {
 	got, ok := p.selectImage(readyTestImages(images), OSArchAMD64Requirement, "latest")
 	require.True(t, ok)
 	require.Equal(t, "ubuntu-gke-2204-1-34-v20260401", got)
+}
+
+func TestResolveImages_Ubuntu_PinnedVersion_LetterSuffix(t *testing.T) {
+	tests := []struct {
+		name    string
+		release string
+		images  []*compute.Image
+		version string
+		want    []string
+	}{
+		{
+			name:    "2404 letter pin resolves the exact lettered build",
+			release: "2404",
+			images: []*compute.Image{
+				{Name: "ubuntu-gke-2404-1-32-amd64-v20251218", CreationTimestamp: "2025-12-18T00:00:00Z"},
+				{Name: "ubuntu-gke-2404-1-32-arm64-v20251218", CreationTimestamp: "2025-12-18T00:05:00Z"},
+				{Name: "ubuntu-gke-2404-1-32-amd64-v20251218a", CreationTimestamp: "2025-12-18T02:00:00Z"},
+				{Name: "ubuntu-gke-2404-1-32-arm64-v20251218a", CreationTimestamp: "2025-12-18T02:05:00Z"},
+				{Name: "ubuntu-gke-2404-1-32-amd64-v20251218b", CreationTimestamp: "2025-12-18T04:00:00Z"},
+				{Name: "ubuntu-gke-2404-1-32-arm64-v20251218b", CreationTimestamp: "2025-12-18T04:05:00Z"},
+				{Name: "ubuntu-gke-2404-1-32-amd64-v20251218ab", CreationTimestamp: "2025-12-18T06:00:00Z"},
+				{Name: "ubuntu-gke-2404-1-32-arm64-v20251218ab", CreationTimestamp: "2025-12-18T06:05:00Z"},
+			},
+			version: "v20251218a",
+			want: []string{
+				"projects/ubuntu-os-gke-cloud/global/images/ubuntu-gke-2404-1-32-amd64-v20251218a",
+				"projects/ubuntu-os-gke-cloud/global/images/ubuntu-gke-2404-1-32-arm64-v20251218a",
+			},
+		},
+		{
+			name:    "2204 letter pin resolves the exact lettered build",
+			release: "2204",
+			images: []*compute.Image{
+				{Name: "ubuntu-gke-2204-1-32-v20251218", CreationTimestamp: "2025-12-18T00:00:00Z"},
+				{Name: "ubuntu-gke-2204-1-32-arm64-v20251218", CreationTimestamp: "2025-12-18T00:05:00Z"},
+				{Name: "ubuntu-gke-2204-1-32-v20251218a", CreationTimestamp: "2025-12-18T02:00:00Z"},
+				{Name: "ubuntu-gke-2204-1-32-arm64-v20251218a", CreationTimestamp: "2025-12-18T02:05:00Z"},
+				{Name: "ubuntu-gke-2204-1-32-v20251218b", CreationTimestamp: "2025-12-18T04:00:00Z"},
+				{Name: "ubuntu-gke-2204-1-32-arm64-v20251218b", CreationTimestamp: "2025-12-18T04:05:00Z"},
+				{Name: "ubuntu-gke-2204-1-32-v20251218ab", CreationTimestamp: "2025-12-18T06:00:00Z"},
+				{Name: "ubuntu-gke-2204-1-32-arm64-v20251218ab", CreationTimestamp: "2025-12-18T06:05:00Z"},
+			},
+			version: "v20251218a",
+			want: []string{
+				"projects/ubuntu-os-gke-cloud/global/images/ubuntu-gke-2204-1-32-v20251218a",
+				"projects/ubuntu-os-gke-cloud/global/images/ubuntu-gke-2204-1-32-arm64-v20251218a",
+			},
+		},
+		{
+			name:    "2404 letterless pin ignores a newer lettered sibling",
+			release: "2404",
+			images: []*compute.Image{
+				{Name: "ubuntu-gke-2404-1-32-amd64-v20251218", CreationTimestamp: "2025-12-18T00:00:00Z"},
+				{Name: "ubuntu-gke-2404-1-32-arm64-v20251218", CreationTimestamp: "2025-12-18T00:05:00Z"},
+				{Name: "ubuntu-gke-2404-1-32-amd64-v20251218a", CreationTimestamp: "2025-12-18T02:00:00Z"},
+				{Name: "ubuntu-gke-2404-1-32-arm64-v20251218a", CreationTimestamp: "2025-12-18T02:05:00Z"},
+			},
+			version: "v20251218",
+			want: []string{
+				"projects/ubuntu-os-gke-cloud/global/images/ubuntu-gke-2404-1-32-amd64-v20251218",
+				"projects/ubuntu-os-gke-cloud/global/images/ubuntu-gke-2404-1-32-arm64-v20251218",
+			},
+		},
+		{
+			name:    "2404 letterless pin with only a lettered build fails",
+			release: "2404",
+			images: []*compute.Image{
+				{Name: "ubuntu-gke-2404-1-32-amd64-v20251218a", CreationTimestamp: "2025-12-18T02:00:00Z"},
+				{Name: "ubuntu-gke-2404-1-32-arm64-v20251218a", CreationTimestamp: "2025-12-18T02:05:00Z"},
+			},
+			version: "v20251218",
+		},
+		{
+			name:    "2204 letterless pin with only a lettered build fails",
+			release: "2204",
+			images: []*compute.Image{
+				{Name: "ubuntu-gke-2204-1-32-v20251218a", CreationTimestamp: "2025-12-18T02:00:00Z"},
+				{Name: "ubuntu-gke-2204-1-32-arm64-v20251218a", CreationTimestamp: "2025-12-18T02:05:00Z"},
+			},
+			version: "v20251218",
+		},
+		{
+			name:    "2404 letter pin does not match a different letter",
+			release: "2404",
+			images: []*compute.Image{
+				{Name: "ubuntu-gke-2404-1-32-amd64-v20251218b", CreationTimestamp: "2025-12-18T04:00:00Z"},
+				{Name: "ubuntu-gke-2404-1-32-arm64-v20251218b", CreationTimestamp: "2025-12-18T04:05:00Z"},
+			},
+			version: "v20251218a",
+		},
+		{
+			name:    "2404 letter pin fails when arm64 has only the letterless build",
+			release: "2404",
+			images: []*compute.Image{
+				{Name: "ubuntu-gke-2404-1-32-amd64-v20251218a", CreationTimestamp: "2025-12-18T02:00:00Z"},
+				{Name: "ubuntu-gke-2404-1-32-arm64-v20251218", CreationTimestamp: "2025-12-18T00:05:00Z"},
+			},
+			version: "v20251218a",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := imageListServer(t, tt.images)
+			defer srv.Close()
+			p := &Ubuntu{computeService: buildComputeService(t, srv), release: tt.release}
+
+			got, err := p.ResolveImages(context.Background(), tt.version)
+			if tt.want == nil {
+				require.Error(t, err)
+				require.True(t, IsImageResolutionError(err), "expected an imageResolutionError, got %v", err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tt.want, imageSources(got))
+		})
+	}
 }

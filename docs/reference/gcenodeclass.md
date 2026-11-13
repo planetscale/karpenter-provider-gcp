@@ -42,6 +42,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `enableNestedVirtualization` _boolean_ | EnableNestedVirtualization defines whether the instance can run nested virtual machines.<br />Only supported on Intel-based machine families; not supported on E2, AMD, Arm or<br />Confidential VM instances. |  | Optional: \{\} <br /> |
+| `threadsPerCore` _integer_ | ThreadsPerCore is the number of threads per physical core. Machine types default to 2<br />(simultaneous multithreading); set 1 to disable SMT. With 1 the guest sees half the<br />machine type's vCPUs while GCE still bills the full count, so Karpenter sizes the node<br />at half. Not supported on every family (for example C4A, H3, N4A, T2A, T2D and<br />shared-core types); GCE rejects an unsupported machine type at create. |  | Enum: [1 2] <br />Optional: \{\} <br /> |
 
 
 
@@ -63,6 +64,7 @@ _Appears in:_
 | `category` _[DiskCategory](#diskcategory)_ | The category of the disk (e.g., pd-standard, pd-balanced, pd-ssd, pd-extreme). |  | Enum: [hyperdisk-balanced hyperdisk-balanced-high-availability hyperdisk-extreme hyperdisk-ml hyperdisk-throughput pd-balanced pd-extreme pd-ssd pd-standard] <br />Optional: \{\} <br /> |
 | `boot` _boolean_ | Indicates that this is a boot disk. |  | Optional: \{\} <br /> |
 | `secondaryBootImage` _string_ | SecondaryBootImage is the secondary boot disk image name (e.g. global/images/DISK_IMAGE_NAME). |  | Optional: \{\} <br /> |
+| `deviceName` _string_ | DeviceName is the device name of a data disk: the guest sees the disk as<br />/dev/disk/by-id/google-<deviceName>, so node bootstrap can find it by a<br />fixed path. Not supported on the boot disk or a secondary boot disk,<br />whose device names the provider sets. Prefixes that GCE or GKE assign<br />themselves are reserved. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
 | `secondaryBootMode` _[SecondaryBootDiskMode](#secondarybootdiskmode)_ | SecondaryBootMode is the secondary boot disk mode (e.g. CONTAINER_IMAGE_CACHE). |  | Enum: [MODE_UNSPECIFIED CONTAINER_IMAGE_CACHE] <br />Optional: \{\} <br /> |
 | `kmsKeyName` _string_ | KMSKeyName is the Cloud KMS key to use for disk encryption.<br />Format: projects/\{project\}/locations/\{region\}/keyRings/\{keyring\}/cryptoKeys/\{key\}<br />Optionally, you can specify a version: projects/\{project\}/locations/\{region\}/keyRings/\{keyring\}/cryptoKeys/\{key\}/cryptoKeyVersions/\{version\} |  | Pattern: `^projects/[^/]+/locations/[^/]+/keyRings/[^/]+/cryptoKeys/[^/]+(/cryptoKeyVersions/[^/]+)?$` <br />Optional: \{\} <br /> |
 | `kmsKeyServiceAccount` _string_ | KMSKeyServiceAccount is the service account to use for accessing the KMS key.<br />If not specified, the Compute Engine default service account will be used. |  | Pattern: `^[^@]+@(developer\.gserviceaccount\.com\|[^@]+\.iam\.gserviceaccount\.com)$` <br />Optional: \{\} <br /> |
@@ -213,11 +215,14 @@ _Appears in:_
 | `networkTags` _[NetworkTag](#networktag) array_ | NetworkTags is a list of network tags to apply to the node. |  | MaxItems: 20 <br />MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z]([-a-z0-9]\{0,61\}[a-z0-9])?$` <br />Optional: \{\} <br /> |
 | `resourceManagerTags` _object (keys:string, values:[ResourceManagerTagValue](#resourcemanagertagvalue))_ | ResourceManagerTags are GCP resource manager (secure) tags bound to the instance<br />at creation. Unlike network tags, binding them is IAM-controlled, so they can be<br />used as targets in network firewall policies, IAM conditions and organization policies.<br />Keys are `tagKeys/\{tag_key_id\}` or `\{org_id\|project_id\}/\{tag_key_short_name\}`; values are<br />`tagValues/\{tag_value_id\}` or `\{tag_value_short_name\}`. Mirrors GKE node pool<br />resource_manager_tags. The Karpenter service account needs roles/resourcemanager.tagUser<br />on the tag values. |  | MaxProperties: 50 <br />Optional: \{\} <br /> |
 | `shieldedInstanceConfig` _[ShieldedInstanceConfig](#shieldedinstanceconfig)_ | ShieldedInstanceConfig enables Shielded VM for provisioned nodes: Secure Boot,<br />virtual TPM, and integrity monitoring. |  | Optional: \{\} <br /> |
+| `minCpuPlatform` _string_ | MinCpuPlatform is the minimum CPU platform for provisioned nodes, for example<br />"Intel Ice Lake" or "Intel Granite Rapids". GCE schedules the node on that platform or<br />a newer one. Leave unset to let GCE choose. GCE rejects a platform the machine type does<br />not offer, so restrict the NodePool to machine types that do.<br />Mirrors GKE NodeConfig.minCpuPlatform (Terraform node_config.min_cpu_platform). |  | Optional: \{\} <br /> |
+| `gvnic` _[VirtualNIC](#virtualnic)_ | GVNIC configures Google Virtual NIC on every network interface of provisioned nodes.<br />When unset, GCE chooses the interface type. Mirrors GKE NodeConfig.gvnic<br />(Terraform node_config.gvnic). |  | Optional: \{\} <br /> |
 | `advancedMachineFeatures` _[AdvancedMachineFeatures](#advancedmachinefeatures)_ | AdvancedMachineFeatures configures advanced CPU and virtualisation options for provisioned nodes. |  | Optional: \{\} <br /> |
 | `confidentialInstanceType` _string_ | ConfidentialInstanceType enables Confidential VM for provisioned nodes using the<br />named technology (AMD SEV / SEV-SNP or Intel TDX), providing in-use memory<br />encryption. Leave unset to disable. Only supported on specific machine families. |  | Enum: [SEV SEV_SNP TDX] <br />Optional: \{\} <br /> |
 | `networkConfig` _[NetworkConfig](#networkconfig)_ | NetworkConfig allows overriding per-interface network settings for provisioned nodes. |  | Optional: \{\} <br /> |
 | `autoGPUTaint` _boolean_ | AutoGPUTaint, when true, automatically applies nvidia.com/gpu=present:NoSchedule<br />to any GPU node at provisioning time, regardless of the NodePool configuration.<br />Disabled by default to preserve backward compatibility. |  | Optional: \{\} <br /> |
 | `gpuDriverVersion` _string_ | GPUDriverVersion controls which NVIDIA driver version GKE installs on GPU nodes.<br />Mirrors the GKE node pool gpu_driver_installation_config.gpu_driver_version field.<br />Valid values: "default" (GKE-recommended stable), "latest" (newest, COS only),<br />"disabled" (skip automatic installation).<br />Ignored for non-GPU instance types. | default | Enum: [default latest disabled] <br />Optional: \{\} <br /> |
+| `gpuSharingConfig` _[GPUSharingConfig](#gpusharingconfig)_ | GPUSharingConfig lets multiple containers share each physical GPU.<br />Mirrors the GKE node pool guest_accelerator.gpu_sharing_config field.<br />Ignored for non-GPU instance types. |  | Optional: \{\} <br /> |
 | `localSsdMode` _[LocalSSDMode](#localssdmode)_ | LocalSsdMode exposes local SSDs as raw devices or kubelet ephemeral storage. | RawBlock | Enum: [RawBlock Ephemeral] <br />Optional: \{\} <br /> |
 | `preemptionNoticeDuration` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#duration-v1-meta)_ | PreemptionNoticeDuration is how long before shutdown GCE flips the<br />instance/preempted metadata key on a Spot VM. Unset (the default) gives no advance<br />notice: the key flips at the same moment the ACPI G2 Soft Off signal is sent.<br />"120s" gives a two-minute warning, letting Karpenter start draining before shutdown.<br />GCE currently accepts up to two minutes.<br />Only applies to Spot capacity; ignored for on-demand nodes.<br />Reading the notice requires an agent on the node that watches the metadata key<br />and sets the GCESpotPreempting condition — see docs/spot-preemption.md. |  | Pattern: `^([0-9]+(s\|m\|h))+$` <br />Type: string <br />Optional: \{\} <br /> |
 
@@ -238,6 +243,40 @@ _Appears in:_
 | `images` _[Image](#image) array_ | Image contains the current image that are available to the<br />cluster under the Image selectors. |  | Optional: \{\} <br /> |
 | `subnetRanges` _[SubnetRangeStatus](#subnetrangestatus) array_ | SubnetRanges contains the pod secondary IPv4 ranges considered for launch<br />and their Compute-reported free IPv4 address counts when known. |  | Optional: \{\} <br /> |
 | `conditions` _Condition array_ | Conditions contains signals for health and readiness |  | Optional: \{\} <br /> |
+
+
+#### GPUSharingConfig
+
+
+
+GPUSharingConfig configures GPU sharing on GPU nodes.
+
+
+
+_Appears in:_
+- [GCENodeClassSpec](#gcenodeclassspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `strategy` _[GPUSharingStrategy](#gpusharingstrategy)_ | Strategy is the GPU sharing strategy. |  | Enum: [TimeSharing] <br />Required: \{\} <br /> |
+| `maxSharedClientsPerGPU` _integer_ | MaxSharedClientsPerGPU is the number of containers that can share one<br />physical GPU. The node advertises this many nvidia.com/gpu per GPU. |  | Maximum: 48 <br />Minimum: 2 <br />Required: \{\} <br /> |
+
+
+#### GPUSharingStrategy
+
+_Underlying type:_ _string_
+
+GPUSharingStrategy selects how containers share a physical GPU.
+
+_Validation:_
+- Enum: [TimeSharing]
+
+_Appears in:_
+- [GPUSharingConfig](#gpusharingconfig)
+
+| Field | Description |
+| --- | --- |
+| `TimeSharing` | GPUSharingStrategyTimeSharing time-slices each GPU between containers.<br /> |
 
 
 #### HugepagesConfig
@@ -294,7 +333,7 @@ _Appears in:_
 | `id` _string_ | ID specifies a GKE image by its full resource URL. |  | MaxLength: 160 <br />Optional: \{\} <br /> |
 | `family` _string_ | Family specifies the OS image family. Required when using Channel or Version.<br />Valid values: ContainerOptimizedOS, Ubuntu2404, Ubuntu2204. |  | Enum: [ContainerOptimizedOS Ubuntu2404 Ubuntu2204] <br />Optional: \{\} <br /> |
 | `channel` _string_ | Channel specifies the GKE release channel to follow. Only valid when Family is ContainerOptimizedOS.<br />Use "cluster" to track the channel the cluster is enrolled in. |  | Enum: [rapid regular stable extended cluster] <br />Optional: \{\} <br /> |
-| `version` _string_ | Version pins the image to a specific version or "latest".<br />For ContainerOptimizedOS: "latest" or "milestone.build.build.build" (e.g. "125.19216.104.126").<br />For Ubuntu2404/Ubuntu2204: "latest" or "vYYYYMMDD" (e.g. "v20260416"). |  | MaxLength: 32 <br />Optional: \{\} <br /> |
+| `version` _string_ | Version pins the image to a specific version or "latest".<br />For ContainerOptimizedOS: "latest" or "milestone.build.build.build" (e.g. "125.19216.104.126").<br />For Ubuntu2404/Ubuntu2204: "latest" or "vYYYYMMDD" with an optional release letter (e.g. "v20260416", "v20251218a"). |  | MaxLength: 32 <br />Optional: \{\} <br /> |
 
 
 #### KubeletConfiguration
@@ -328,6 +367,10 @@ _Appears in:_
 | `cpuCFSQuota` _boolean_ | CPUCFSQuota enables CPU CFS quota enforcement for containers that specify CPU limits. |  | Optional: \{\} <br /> |
 | `serializeImagePulls` _boolean_ | SerializeImagePulls, when enabled, tells the kubelet to pull images one at a<br />time. Must be explicitly set to false to set MaxParallelImagePulls above 1.<br />Default: true |  | Optional: \{\} <br /> |
 | `maxParallelImagePulls` _integer_ | MaxParallelImagePulls sets the maximum number of image pulls in parallel.<br />Values above 1 require SerializeImagePulls to be explicitly set to false.<br />Nodes with many DaemonSets pulling cold images concurrently (a common case<br />right after a fresh node joins the cluster) benefit most from raising this<br />above the kubelet default of 1. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `failSwapOn` _boolean_ | FailSwapOn tells the kubelet to fail to start if swap is enabled on the node.<br />Must be explicitly set to false for memorySwap.swapBehavior LimitedSwap, unless<br />linuxNodeConfig.swapConfig creates the swap file: the provider then defaults it<br />to false for the node.<br />Default: true |  | Optional: \{\} <br /> |
+| `memorySwap` _[MemorySwapConfiguration](#memoryswapconfiguration)_ | MemorySwap configures swap memory available to container workloads. Swap that<br />the provider creates is requested separately through linuxNodeConfig.swapConfig;<br />without it, providing a swap device or file is up to the node image or a DaemonSet. |  | Optional: \{\} <br /> |
+| `shutdownGracePeriod` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#duration-v1-meta)_ | ShutdownGracePeriod is how long the node delays its shutdown so that pods<br />can terminate, for example when GCE stops or deletes the VM. It turns on<br />graceful node shutdown. Spot nodes default to 30s; on-demand nodes default<br />to 0s. Source node pool shutdown settings are not inherited. |  | Pattern: `^([0-9]+(\.[0-9]+)?(ns\|us\|µs\|ms\|s\|m\|h))+$` <br />Type: string <br />Optional: \{\} <br /> |
+| `shutdownGracePeriodCriticalPods` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#duration-v1-meta)_ | ShutdownGracePeriodCriticalPods is the part of shutdownGracePeriod<br />reserved for critical pods, which terminate after all other pods.<br />Spot nodes default to 15s; on-demand nodes default to 0s. When only<br />shutdownGracePeriod is set, a larger Spot default is lowered to it. |  | Pattern: `^([0-9]+(\.[0-9]+)?(ns\|us\|µs\|ms\|s\|m\|h))+$` <br />Type: string <br />Optional: \{\} <br /> |
 
 
 #### KubeletQuantity
@@ -358,6 +401,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `hugepages` _[HugepagesConfig](#hugepagesconfig)_ | Hugepages configures the static hugepages that the node allocates at boot.<br />Mirrors GKE node pool linux_node_config.hugepages_config. |  | Optional: \{\} <br /> |
+| `swapConfig` _[SwapConfig](#swapconfig)_ | SwapConfig configures the swap file that the node creates at boot, before<br />the kubelet starts. Mirrors GKE node pool linux_node_config.swap_config. |  | Optional: \{\} <br /> |
 
 
 #### LocalSSDMode
@@ -376,6 +420,23 @@ _Appears in:_
 | --- | --- |
 | `RawBlock` | LocalSSDModeRawBlock leaves local SSDs unformatted.<br /> |
 | `Ephemeral` | LocalSSDModeEphemeral uses local SSDs for kubelet ephemeral storage.<br /> |
+
+
+#### MemorySwapConfiguration
+
+
+
+MemorySwapConfiguration configures swap memory available to container workloads.
+https://pkg.go.dev/k8s.io/kubelet/config/v1beta1#MemorySwapConfiguration
+
+
+
+_Appears in:_
+- [KubeletConfiguration](#kubeletconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `swapBehavior` _string_ | SwapBehavior is NoSwap (workloads cannot use swap, the kubelet default) or<br />LimitedSwap (a container's swap limit is proportionate to its memory request,<br />for Burstable pods only). |  | Enum: [NoSwap LimitedSwap] <br />Optional: \{\} <br /> |
 
 
 #### NetworkConfig
@@ -480,5 +541,73 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `name` _string_ | Name is the subnetwork secondary IPv4 range name. |  | Required: \{\} <br /> |
 | `totalFreeIP` _integer_ | TotalFreeIP is the Compute-reported number of free IPv4 addresses in this<br />secondary range. Omitted when unknown; zero means no free addresses were reported.<br />Counts are snapshots, not a guarantee of an allocatable contiguous pod CIDR block. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+
+
+#### SwapBootDiskProfile
+
+
+
+SwapBootDiskProfile defines a swap file on the boot disk.
+
+
+
+_Appears in:_
+- [SwapConfig](#swapconfig)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `swapSizeGib` _integer_ | SwapSizeGib is the size of the swap file in GiB. Omit it to use the<br />automatic size, which GKE derives from the machine's memory: twice the<br />memory up to 8 GiB, plus 8 GiB above that, at most half of the boot disk. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+
+
+#### SwapConfig
+
+
+
+SwapConfig defines the swap file that a node creates at boot.
+The GKE node bootstrap creates the file before the kubelet starts, so the
+kubelet finds the swap already active at its first start.
+
+
+
+_Appears in:_
+- [LinuxNodeConfig](#linuxnodeconfig)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled creates the swap file on the node. Defaults to false, which<br />neither creates a swap file nor inherits the source node pool's swap. |  | Optional: \{\} <br /> |
+| `encryptionConfig` _[SwapEncryptionConfig](#swapencryptionconfig)_ | EncryptionConfig configures the encryption of the swap file. The swap<br />file is encrypted with a key that the node generates at boot, unless<br />encryptionConfig.disabled is true. |  | Optional: \{\} <br /> |
+| `bootDiskProfile` _[SwapBootDiskProfile](#swapbootdiskprofile)_ | BootDiskProfile creates the swap file on the boot disk. Omit it to use the<br />automatic size GKE derives from the machine's memory and the boot disk. |  | Optional: \{\} <br /> |
+
+
+#### SwapEncryptionConfig
+
+
+
+SwapEncryptionConfig defines the encryption of the swap file.
+
+
+
+_Appears in:_
+- [SwapConfig](#swapconfig)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `disabled` _boolean_ | Disabled turns off the encryption of the swap file. |  | Optional: \{\} <br /> |
+
+
+#### VirtualNIC
+
+
+
+VirtualNIC configures the Google Virtual NIC (gVNIC) feature, matching GKE VirtualNIC.
+
+
+
+_Appears in:_
+- [GCENodeClassSpec](#gcenodeclassspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled selects GVNIC when true and VIRTIO_NET when false on every interface.<br />GCE rejects a type unsupported by the machine series or node image. |  | Required: \{\} <br /> |
 
 

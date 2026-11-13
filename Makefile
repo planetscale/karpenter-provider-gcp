@@ -28,7 +28,7 @@ PDCSI_NODE_LABELER_CONFIGMAP = deploy/kubernetes/overlays/node-labeler/configmap
 help: ## Display help
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z_0-9-]+:.*?##/ { printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
 
-presubmit: toolchain verify ci ## Run all steps in the developer loop
+presubmit: toolchain verify ci vulncheck ## Run all steps in the developer loop
 ci: verify-codegen verify-deadcode chart-lint verify-crds ut-test docs-lint ## Steps run in CI (toolchain and lint handled by dedicated workflow steps)
 
 toolchain: ## Install developer toolchain
@@ -64,12 +64,13 @@ chart-lint: chart-deps ## Lint the Helm charts (validates values.schema.json and
 	helm lint charts/karpenter/
 	helm lint charts/karpenter-crd/
 
+# CRD admission validation uses embedded Kubernetes libraries; an empty version skips GitHub schema discovery.
 # Remove nojsonv2 once kubectl-validate no longer uses its legacy vendored JSON implementation.
 verify-crds: ## Validate generated CRDs with Kubernetes API server validation logic
 	@tmpdir=$$(mktemp -d); \
 	trap 'rm -rf "$$tmpdir"' EXIT; \
 	helm template karpenter-crd charts/karpenter-crd --include-crds > "$$tmpdir/karpenter-crd.yaml"; \
-	(cd hack/crd-tools && GOEXPERIMENT=nojsonv2 go tool kubectl-validate --version 1.35 ../../charts/karpenter/crds/ "$$tmpdir")
+	(cd hack/crd-tools && KUBECONFIG=/dev/null GOEXPERIMENT=nojsonv2 go tool kubectl-validate --version= ../../charts/karpenter/crds/ "$$tmpdir")
 
 verify: ## Verify code. Includes linting, formatting, etc
 	@command -v golangci-lint >/dev/null 2>&1 || (echo "golangci-lint not found — install it from https://golangci-lint.run/welcome/install/" && exit 1)
@@ -79,9 +80,9 @@ verify: ## Verify code. Includes linting, formatting, etc
 verify-deadcode: ## Check for dead code using whole-program analysis
 	@output=$$(deadcode -test ./... 2>&1); if [ -n "$$output" ]; then echo "$$output"; exit 1; fi
 
-DOCS_FILES = $(shell find docs proposals -name "*.md" ! -path "docs/reference/*" 2>/dev/null)
+DOCS_FILES = $(shell find . -maxdepth 1 -type f -name "*.md") $(shell find docs proposals -name "*.md" ! -path "docs/reference/*" 2>/dev/null)
 
-docs-lint: ## Check docs markdown formatting (excludes generated reference docs)
+docs-lint: ## Check root and docs markdown formatting (excludes generated reference docs)
 	mdox fmt --check $(DOCS_FILES)
 
 docs-fix: ## Auto-fix docs markdown formatting
@@ -105,6 +106,12 @@ delete: ## Delete the controller from your kubeconfig cluster
 	helm uninstall karpenter --namespace ${KARPENTER_NAMESPACE}
 	kubectl delete ns ${KARPENTER_NAMESPACE}
 
+# Keep recursive expansion: resolve the pinned scanner only when vulncheck runs.
+GOVULNCHECK = $(shell cd hack/tools && GOOS= GOARCH= go tool -n govulncheck)
+VULNCHECK_FLAGS ?=
+vulncheck: ## Check reachable controller and unit-test vulnerabilities
+	@$(GOVULNCHECK) -test $(VULNCHECK_FLAGS) ./cmd/controller/... ./pkg/...
+
 ut-test: ## Run unit tests
 	go test -race ./pkg/... \
 		-cover -coverprofile=coverage.out -outputdir=.
@@ -120,6 +127,7 @@ E2E_SA_PATH      ?=
 E2E_LOCATION     ?=
 E2E_PREFIX       ?= karpenter-e2e
 E2E_REGION       ?= us-central1
+E2E_NODE_SERVICE_ACCOUNT ?=
 E2E_CLUSTER_NAME         ?= $(E2E_PREFIX)-cluster
 E2E_PODS_RANGE           ?= $(E2E_PREFIX)-pods
 E2E_SMALL_PODS_RANGE     ?= $(E2E_PREFIX)-pods-small
@@ -132,13 +140,8 @@ E2E_KARPENTER_DEPLOYMENT ?=
 E2E_GAC_ENV     = $(if $(E2E_SA_PATH),GOOGLE_APPLICATION_CREDENTIALS=$(E2E_SA_PATH))
 E2E_GAC_ENV_ABS = $(if $(E2E_SA_PATH),GOOGLE_APPLICATION_CREDENTIALS=$(abspath $(E2E_SA_PATH)))
 
-e2e-setup: require-e2e-vars ## Create (or reuse) the e2e GKE cluster and supporting GCP infra
-	$(E2E_GAC_ENV) \
-	E2E_PROJECT_ID=$(E2E_PROJECT_ID) \
-	E2E_PREFIX=$(E2E_PREFIX) \
-	E2E_REGION=$(E2E_REGION) \
-	E2E_LOCATION=$(E2E_LOCATION) \
-	./hack/e2e-setup.sh
+e2e-setup: ## Use deploy/terraform-e2e/ for persistent e2e infrastructure
+	@echo "e2e-setup is retired; see deploy/terraform-e2e/README.md for the approved Terraform maintenance procedure" >&2; exit 1
 
 e2e-clean-env: require-e2e-vars ## Remove leftover e2e Kubernetes resources (preserves cluster and controller)
 	E2E_PROJECT_ID=$(E2E_PROJECT_ID) E2E_LOCATION=$(E2E_LOCATION) E2E_PREFIX=$(E2E_PREFIX) ./hack/e2e-clean-env.sh
@@ -150,6 +153,7 @@ e2e-deploy: require-e2e-vars ## Clean e2e resources, then deploy karpenter; set 
 	E2E_PREFIX=$(E2E_PREFIX) \
 	E2E_REGION=$(E2E_REGION) \
 	E2E_LOCATION=$(E2E_LOCATION) \
+	E2E_NODE_SERVICE_ACCOUNT=$(E2E_NODE_SERVICE_ACCOUNT) \
 	RELEASE_VERSION=$(RELEASE_VERSION) \
 	./hack/e2e-deploy.sh
 
@@ -163,7 +167,7 @@ E2E_SELECTION ?=
 E2E_PRESET ?=
 E2E_LOCK_ID ?=
 E2E_REPORT ?= e2e-report.md
-e2e-tests: require-e2e-vars ## Run selected features (E2E_SELECTION=standard|gpu|all|provisioning|drift,storage, GINKGO_PROCS=N)
+e2e-tests: require-e2e-vars ## Run selected features (E2E_SELECTION=standard|gpu|all|provisioning|drift,storage, GINKGO_PROCS=N, RELEASE_VERSION=X.Y.Z)
 	@if [ -n "$(E2E_SELECTION)" ] && [ -n "$(E2E_PRESET)" ]; then echo "ERROR: set E2E_SELECTION or E2E_PRESET, not both" >&2; exit 1; fi
 	$(E2E_GAC_ENV_ABS) \
 	PROJECT_ID=$(E2E_PROJECT_ID) \
@@ -174,7 +178,7 @@ e2e-tests: require-e2e-vars ## Run selected features (E2E_SELECTION=standard|gpu
 	RESOURCE_MANAGER_TAG_KEY=$(E2E_RESOURCE_MANAGER_TAG_KEY) \
 	KARPENTER_NAMESPACE=$(E2E_KARPENTER_NAMESPACE) \
 	KARPENTER_DEPLOYMENT=$(E2E_KARPENTER_DEPLOYMENT) \
-	go run ./hack/e2e-runner --selection="$(or $(E2E_SELECTION),$(E2E_PRESET),standard)" --report=$(E2E_REPORT) --lock-id="$(E2E_LOCK_ID)" -- --procs=$(GINKGO_PROCS) --timeout=2h -v
+	go run ./hack/e2e-runner --selection="$(or $(E2E_SELECTION),$(E2E_PRESET),standard)" --report=$(E2E_REPORT) --lock-id="$(E2E_LOCK_ID)" --release-version="$(RELEASE_VERSION)" -- --procs=$(GINKGO_PROCS) --timeout=2h -v
 
 FOCUS ?=
 SUITE ?=
@@ -193,12 +197,8 @@ e2e-test: require-e2e-vars ## Run a feature directory or focused spec (SUITE=<na
 	$(if $(SUITE),,--label-filter='!suite:gpu && !suite:local-ssd-extended') \
 	$(if $(SUITE),./test/suites/$(SUITE)/,./test/suites/)
 
-e2e-teardown: ## Delete the e2e GKE cluster and all supporting GCP infra
-	$(E2E_GAC_ENV) \
-	E2E_PREFIX=$(E2E_PREFIX) \
-	E2E_REGION=$(E2E_REGION) \
-	E2E_LOCATION=$(E2E_LOCATION) \
-	./hack/e2e-teardown.sh
+e2e-teardown: ## Use deploy/terraform-e2e/ for approved retirement
+	@echo "e2e-teardown is retired; see deploy/terraform-e2e/README.md for the approved Terraform retirement procedure" >&2; exit 1
 
 e2e-check-clean: ## Report any orphaned e2e GCP resources (does not delete)
 	$(E2E_GAC_ENV) \
@@ -240,7 +240,7 @@ codegen: ## Auto generate files based on GCP APIs
 crds: ## Apply CRDs
 	kubectl apply -f charts/karpenter/crds/
 
-.PHONY: help presubmit ci run ut-test require-project-id e2e-setup e2e-tests e2e-test e2e-teardown e2e-check-clean e2e-deploy e2e-clean-env coverage update update-pdcsi-compatibility update-pricing verify-codegen verify verify-crds verify-deadcode image apply delete toolchain tidy download docs-lint docs-fix
+.PHONY: help presubmit ci run vulncheck ut-test require-project-id e2e-setup e2e-tests e2e-test e2e-teardown e2e-check-clean e2e-deploy e2e-clean-env coverage update update-pdcsi-compatibility update-pricing verify-codegen verify verify-crds verify-deadcode image apply delete toolchain tidy download docs-lint docs-fix
 
 define newline
 

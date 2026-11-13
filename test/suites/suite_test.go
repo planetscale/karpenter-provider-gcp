@@ -32,6 +32,7 @@ import (
 	_ "github.com/cloudpilot-ai/karpenter-provider-gcp/test/suites/gc"
 	_ "github.com/cloudpilot-ai/karpenter-provider-gcp/test/suites/gpu"
 	_ "github.com/cloudpilot-ai/karpenter-provider-gcp/test/suites/hugepages"
+	_ "github.com/cloudpilot-ai/karpenter-provider-gcp/test/suites/instance-config"
 	_ "github.com/cloudpilot-ai/karpenter-provider-gcp/test/suites/interruption"
 	_ "github.com/cloudpilot-ai/karpenter-provider-gcp/test/suites/kubelet_config"
 	_ "github.com/cloudpilot-ai/karpenter-provider-gcp/test/suites/local-ssd"
@@ -41,6 +42,7 @@ import (
 	_ "github.com/cloudpilot-ai/karpenter-provider-gcp/test/suites/provisioning"
 	_ "github.com/cloudpilot-ai/karpenter-provider-gcp/test/suites/repair"
 	_ "github.com/cloudpilot-ai/karpenter-provider-gcp/test/suites/storage"
+	_ "github.com/cloudpilot-ai/karpenter-provider-gcp/test/suites/threads-per-core"
 )
 
 func TestE2E(t *testing.T) {

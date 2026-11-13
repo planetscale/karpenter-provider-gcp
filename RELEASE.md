@@ -31,7 +31,7 @@ Edit `MIGRATION.md`:
 - Move items from the `Unreleased` section into a new `vX.Y.0` section.
 - Leave an empty `Unreleased` section at the top.
 
-Open a _"chore: prepare vX.Y.0 release"_ PR and add the `release-prep` label (excludes it from the auto-generated changelog). Then run the full e2e suite — the PR only touches docs, so this validates the release candidate code before the merge commit is tagged:
+Open a *"chore: prepare vX.Y.0 release"* PR and add the `release-prep` label (excludes it from the auto-generated changelog). Then run the full e2e suite — the PR only touches docs, so this validates the release candidate code before the merge commit is tagged:
 
 ```bash
 make e2e-deploy E2E_PROJECT_ID=<PROJECT_ID> E2E_SA_PATH=<SA_KEY> E2E_LOCATION=<ZONE> E2E_REGION=<REGION>
@@ -64,7 +64,35 @@ git cat-file -p vX.Y.0 | head -3
 git push https://github.com/cloudpilot-ai/karpenter-provider-gcp.git vX.Y.0
 ```
 
-### 4. Create GitHub release
+### 4. Wait for builds and verify published artefacts
+
+The tag push starts the [release workflow](.github/workflows/release.yaml), which publishes the controller image and Helm charts independently of the GitHub release. When resuming a previously tagged release, use the workflow path in that tag: older releases, including `v0.8.0`, used `release-build.yaml`, which remains part of their signing identity. Before creating or publishing the GitHub release:
+
+- Confirm the workflow run is for the exact signed tag and release commit.
+- Wait for both `image-publish` and `package-chart` to complete successfully. Stop on failure; do not overwrite the tag or automatically rerun publication.
+- Verify that the published image and both charts are available, then verify their signatures and build provenance using the commands below. Workflow success alone is not sufficient evidence of artifact availability or successful client-side verification.
+
+```bash
+RELEASE_VERSION=X.Y.0
+
+# Docker image (ECR Public)
+TOKEN=$(curl -s "https://public.ecr.aws/token/?scope=repository:cloudpilotai/gcp/karpenter:pull" | jq -r '.token')
+curl -fsS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Accept: application/vnd.oci.image.index.v1+json" \
+  "https://public.ecr.aws/v2/cloudpilotai/gcp/karpenter/manifests/v${RELEASE_VERSION}" \
+  | jq -r '.mediaType'
+
+# Helm charts (GitHub Pages)
+curl -s "https://cloudpilot-ai.github.io/karpenter-provider-gcp/index.yaml" \
+  | grep -A3 "version: ${RELEASE_VERSION}"
+```
+
+Also confirm the new version appears on [ArtifactHub](https://artifacthub.io/packages/helm/karpenter-provider-gcp/karpenter).
+
+> **Check signatures:** Run the commands in [Verify release artifacts](docs/getting-started/installation.md#verify-release-artifacts-optional) with `VERSION=vX.Y.0` (note the leading `v`). This confirms that users can verify the published image signature, chart signatures, and build provenance. Fix any availability, signature, or provenance failure before proceeding to the GitHub release draft or publication. Confirm both the `karpenter` and `karpenter-crd` charts, not just one entry in the Helm index.
+
+### 5. Create GitHub release
 
 ```bash
 # Create a draft with auto-generated changelog and migration note prepended.
@@ -91,26 +119,6 @@ Review the draft at `https://github.com/cloudpilot-ai/karpenter-provider-gcp/rel
 ```bash
 gh release edit vX.Y.0 --repo cloudpilot-ai/karpenter-provider-gcp --draft=false
 ```
-
-### 5. Verify published artefacts
-
-```bash
-RELEASE_VERSION=X.Y.0
-
-# Docker image (ECR Public)
-TOKEN=$(curl -s "https://public.ecr.aws/token/?scope=repository:cloudpilotai/gcp/karpenter:pull" | jq -r '.token')
-curl -fsS \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "Accept: application/vnd.oci.image.index.v1+json" \
-  "https://public.ecr.aws/v2/cloudpilotai/gcp/karpenter/manifests/v${RELEASE_VERSION}" \
-  | jq -r '.mediaType'
-
-# Helm charts (GitHub Pages)
-curl -s "https://cloudpilot-ai.github.io/karpenter-provider-gcp/index.yaml" \
-  | grep -A3 "version: ${RELEASE_VERSION}"
-```
-
-Also confirm the new version appears on [ArtifactHub](https://artifacthub.io/packages/helm/karpenter-provider-gcp/karpenter).
 
 ### 6. Validate on the e2e cluster
 
@@ -175,7 +183,7 @@ Post a release announcement to **#karpenter-gcp** on [Kubernetes Slack](https://
    git push https://github.com/cloudpilot-ai/karpenter-provider-gcp.git vX.Y.Z
    ```
 
-4. Create the GitHub release draft. Note: `target_commitish` must point to `release-X.Y`, not `main`:
+4. Follow step 4 of the minor release process to wait for the tag-triggered builds and verify published artifacts, signatures, and provenance, substituting `X.Y.Z` for the version. Only after verification succeeds, create the GitHub release draft. Note: `target_commitish` must point to `release-X.Y`, not `main`:
 
    ```bash
    gh release create vX.Y.Z \
@@ -192,7 +200,7 @@ Post a release announcement to **#karpenter-gcp** on [Kubernetes Slack](https://
      --draft
    ```
 
-5. Follow steps 5–7 of the minor release process above, substituting `X.Y.Z` for the patch version and running:
+5. Follow steps 5–7 of the minor release process above, substituting `X.Y.Z` for the patch version. For step 5, review and publish the draft created above rather than creating another release. Then validate the published release with:
 
    ```bash
    git checkout release-X.Y

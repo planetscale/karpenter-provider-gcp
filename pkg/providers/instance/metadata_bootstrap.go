@@ -19,6 +19,7 @@ package instance
 import (
 	"fmt"
 	"maps"
+	"math"
 	"strings"
 	"time"
 
@@ -111,6 +112,111 @@ func patchHugepagesKubeEnv(target *metadata.InstanceMetadata, nodeClass *v1alpha
 	}
 }
 
+// gcfsdCacheTiers are the image streaming memory reservation tiers GKE
+// documents, in basis points of each band of node memory:
+// https://cloud.google.com/kubernetes-engine/docs/how-to/image-streaming
+var gcfsdCacheTiers = []struct {
+	bandMiB     int64
+	basisPoints int64
+}{
+	{bandMiB: 4 * 1024, basisPoints: 100},
+	{bandMiB: 4 * 1024, basisPoints: 80},
+	{bandMiB: 8 * 1024, basisPoints: 40},
+	{bandMiB: 112 * 1024, basisPoints: 24},
+	{bandMiB: math.MaxInt64, basisPoints: 8},
+}
+
+// gcfsdCacheSizeMiB returns the GCFSD_CACHE_SIZE_MIB that GKE writes for a
+// machine with memoryMiB of memory: the documented image streaming
+// reservation, rounded to MiB, less 2 MiB. The 2 MiB is not documented; it
+// matches every GKE 1.37 node pool template checked (8 to 64 GiB machines).
+func gcfsdCacheSizeMiB(memoryMiB int64) int64 {
+	if memoryMiB < 1024 {
+		return 0
+	}
+	var total, left int64 = 0, memoryMiB
+	for _, tier := range gcfsdCacheTiers {
+		band := min(left, tier.bandMiB)
+		total += band * tier.basisPoints
+		left -= band
+		if left == 0 {
+			break
+		}
+	}
+	return max((total+5000)/10000-2, 0)
+}
+
+// patchGCFSDCacheSizeKubeEnv sizes the image streaming cache for the machine
+// being launched. GKE writes GCFSD_CACHE_SIZE_MIB into a node pool template
+// for that pool's machine type, and the node bootstrap passes half of it to
+// each of gcfsd's two caches, so a value copied from the source node pool
+// sizes the cache for a different machine. The entry is only present when
+// image streaming is on, and stays absent otherwise.
+func patchGCFSDCacheSizeKubeEnv(target *metadata.InstanceMetadata, memoryMiB int64) {
+	if _, ok := target.GetKubeEnvEntry("GCFSD_CACHE_SIZE_MIB"); !ok || memoryMiB <= 0 {
+		return
+	}
+	if size := gcfsdCacheSizeMiB(memoryMiB); size > 0 {
+		target.SetKubeEnvEntry("GCFSD_CACHE_SIZE_MIB", fmt.Sprintf(`"%d"`, size))
+	} else {
+		target.UnsetKubeEnvEntry("GCFSD_CACHE_SIZE_MIB")
+	}
+}
+
+// swapKubeEnvEntries are the kube-env entries that the GKE node bootstrap
+// (setup-swap in configure-helper.sh) reads to create swap. The node class
+// owns all of them, zswap included, so a node never inherits the swap of the
+// source node pool.
+var swapKubeEnvEntries = []string{
+	"NODE_SWAP_SIZE",
+	"NODE_SWAP_PROFILE",
+	"NODE_SWAP_ENCRYPTION",
+	"NODE_SWAP_DEDICATED_LOCAL_SSD_COUNT",
+	"NODE_ZSWAP_ENABLED",
+	"NODE_ZSWAP_COMPRESSOR",
+	"NODE_ZSWAP_MAX_POOL_PERCENT",
+}
+
+// patchSwapKubeEnv writes the boot-disk swap entries that the node bootstrap
+// consumes. swapGiB is the size the provider resolved for the machine being
+// launched: the bootstrap creates exactly the size it is given and never derives
+// one itself, so the provider has to pass the resolved size.
+func patchSwapKubeEnv(target *metadata.InstanceMetadata, nodeClass *v1alpha1.GCENodeClass, swapGiB int64) {
+	for _, key := range swapKubeEnvEntries {
+		target.UnsetKubeEnvEntry(key)
+	}
+	if nodeClass.BootDiskSwapConfig() == nil {
+		return
+	}
+	// The bootstrap passes NODE_SWAP_SIZE to fallocate -l and wraps the file
+	// in dm-crypt (/dev/mapper/encswap) when NODE_SWAP_ENCRYPTION is "true".
+	target.SetKubeEnvEntry("NODE_SWAP_PROFILE", "BOOT_DISK")
+	target.SetKubeEnvEntry("NODE_SWAP_SIZE", fmt.Sprintf("%dGiB", swapGiB))
+	target.SetKubeEnvEntry("NODE_SWAP_ENCRYPTION", fmt.Sprintf(`"%t"`, nodeClass.BootDiskSwapEncrypted()))
+}
+
+// gpuSharingKubeEnvEntries are the kube-env entries GKE writes on shared-GPU node pools;
+// the GPU device plugin reads them to advertise MaxSharedClientsPerGPU replicas per GPU.
+var gpuSharingKubeEnvEntries = []string{
+	"GPU_SHARING_STRATEGY",
+	"MAX_SHARED_CLIENTS_PER_GPU",
+	"MAX_TIME_SHARED_CLIENTS_PER_GPU",
+}
+
+func patchGPUSharingKubeEnv(target *metadata.InstanceMetadata, nodeClass *v1alpha1.GCENodeClass, isGPUInstance bool) {
+	sharing := nodeClass.Spec.GPUSharingConfig
+	if !isGPUInstance || sharing == nil {
+		for _, key := range gpuSharingKubeEnvEntries {
+			target.UnsetKubeEnvEntry(key)
+		}
+		return
+	}
+	clients := fmt.Sprintf(`"%d"`, sharing.MaxSharedClientsPerGPU)
+	target.SetKubeEnvEntry("GPU_SHARING_STRATEGY", sharing.Strategy.GKEValue())
+	target.SetKubeEnvEntry("MAX_SHARED_CLIENTS_PER_GPU", clients)
+	target.SetKubeEnvEntry("MAX_TIME_SHARED_CLIENTS_PER_GPU", clients)
+}
+
 func applyInstanceTypeKubeReserved(config *kubeletconfig.KubeletConfiguration, instanceType *cloudprovider.InstanceType) {
 	mergeStringMap(&config.KubeReserved, map[string]string{
 		"cpu":               fmt.Sprintf("%dm", instanceType.Overhead.KubeReserved.Cpu().MilliValue()),
@@ -119,7 +225,9 @@ func applyInstanceTypeKubeReserved(config *kubeletconfig.KubeletConfiguration, i
 	})
 }
 
-func applySpotShutdownKubeletConfig(config *kubeletconfig.KubeletConfiguration, provisioningModel string) {
+// applyShutdownKubeletDefaults sets capacity-specific defaults after source
+// shutdown settings have been excluded. NodeClass settings are applied afterward.
+func applyShutdownKubeletDefaults(config *kubeletconfig.KubeletConfiguration, provisioningModel string) {
 	if provisioningModel != karpv1.CapacityTypeSpot {
 		return
 	}
@@ -175,6 +283,34 @@ func applyNodeClassRuntimeKubeletConfig(config *kubeletconfig.KubeletConfigurati
 	}
 	if overlay.MaxParallelImagePulls != nil {
 		config.MaxParallelImagePulls = overlay.MaxParallelImagePulls
+	}
+	if overlay.FailSwapOn != nil {
+		config.FailSwapOn = overlay.FailSwapOn
+	}
+	if overlay.MemorySwap != nil && overlay.MemorySwap.SwapBehavior != "" {
+		config.MemorySwap.SwapBehavior = overlay.MemorySwap.SwapBehavior
+	}
+	applyNodeClassShutdownKubeletConfig(config, overlay)
+}
+
+// applyNodeClassShutdownKubeletConfig runs after the Spot defaults, so a node
+// class value replaces them.
+func applyNodeClassShutdownKubeletConfig(config *kubeletconfig.KubeletConfiguration, overlay *v1alpha1.KubeletConfiguration) {
+	if overlay.ShutdownGracePeriod != nil {
+		if config.FeatureGates == nil {
+			config.FeatureGates = map[string]bool{}
+		}
+		config.FeatureGates["GracefulNodeShutdown"] = true
+		config.ShutdownGracePeriod = *overlay.ShutdownGracePeriod
+	}
+	if overlay.ShutdownGracePeriodCriticalPods != nil {
+		config.ShutdownGracePeriodCriticalPods = *overlay.ShutdownGracePeriodCriticalPods
+	}
+	// The kubelet does not start when the critical-pods period exceeds the
+	// total. The CRD keeps an explicit pair valid; a Spot default left in place
+	// by a shorter shutdownGracePeriod is lowered.
+	if config.ShutdownGracePeriodCriticalPods.Duration > config.ShutdownGracePeriod.Duration {
+		config.ShutdownGracePeriodCriticalPods = config.ShutdownGracePeriod
 	}
 }
 

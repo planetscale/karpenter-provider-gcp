@@ -6,7 +6,7 @@ metadata:
     {{- with .Values.additionalAnnotations }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
-    controller-gen.kubebuilder.io/version: v0.22.0
+    controller-gen.kubebuilder.io/version: v0.23.0
   name: gcenodeclasses.karpenter.k8s.gcp
 spec:
   group: karpenter.k8s.gcp
@@ -66,6 +66,18 @@ spec:
                       Only supported on Intel-based machine families; not supported on E2, AMD, Arm or
                       Confidential VM instances.
                     type: boolean
+                  threadsPerCore:
+                    description: |-
+                      ThreadsPerCore is the number of threads per physical core. Machine types default to 2
+                      (simultaneous multithreading); set 1 to disable SMT. With 1 the guest sees half the
+                      machine type's vCPUs while GCE still bills the full count, so Karpenter sizes the node
+                      at half. Not supported on every family (for example C4A, H3, N4A, T2A, T2D and
+                      shared-core types); GCE rejects an unsupported machine type at create.
+                    enum:
+                    - 1
+                    - 2
+                    format: int32
+                    type: integer
                 type: object
               autoGPUTaint:
                 description: |-
@@ -104,6 +116,22 @@ spec:
                       - pd-ssd
                       - pd-standard
                       type: string
+                    deviceName:
+                      description: |-
+                        DeviceName is the device name of a data disk: the guest sees the disk as
+                        /dev/disk/by-id/google-<deviceName>, so node bootstrap can find it by a
+                        fixed path. Not supported on the boot disk or a secondary boot disk,
+                        whose device names the provider sets. Prefixes that GCE or GKE assign
+                        themselves are reserved.
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                      x-kubernetes-validations:
+                      - message: deviceName must not start with persistent-disk-,
+                          local-ssd- or gke-, which GCE and GKE assign
+                        rule: '!self.startsWith(''persistent-disk-'') && !self.startsWith(''local-ssd-'')
+                          && !self.startsWith(''gke-'')'
                     kmsKeyName:
                       description: |-
                         KMSKeyName is the Cloud KMS key to use for disk encryption.
@@ -166,8 +194,16 @@ spec:
                       set or both be unset for hyperdisk-balanced and hyperdisk-balanced-high-availability
                     rule: '!(self.category in [''hyperdisk-balanced'', ''hyperdisk-balanced-high-availability''])
                       || (has(self.provisionedIOPS) == has(self.provisionedThroughput))'
+                  - message: deviceName is only supported on a data disk, not the
+                      boot disk or a secondary boot disk
+                    rule: '!has(self.deviceName) || (!(has(self.boot) && self.boot)
+                      && !has(self.secondaryBootImage))'
                 maxItems: 10
                 type: array
+                x-kubernetes-validations:
+                - message: deviceName must be unique across disks
+                  rule: self.all(d, !has(d.deviceName) || self.filter(e, has(e.deviceName)
+                    && e.deviceName == d.deviceName).size() == 1)
               gpuDriverVersion:
                 default: default
                 description: |-
@@ -181,6 +217,43 @@ spec:
                 - latest
                 - disabled
                 type: string
+              gpuSharingConfig:
+                description: |-
+                  GPUSharingConfig lets multiple containers share each physical GPU.
+                  Mirrors the GKE node pool guest_accelerator.gpu_sharing_config field.
+                  Ignored for non-GPU instance types.
+                properties:
+                  maxSharedClientsPerGPU:
+                    description: |-
+                      MaxSharedClientsPerGPU is the number of containers that can share one
+                      physical GPU. The node advertises this many nvidia.com/gpu per GPU.
+                    format: int32
+                    maximum: 48
+                    minimum: 2
+                    type: integer
+                  strategy:
+                    description: Strategy is the GPU sharing strategy.
+                    enum:
+                    - TimeSharing
+                    type: string
+                required:
+                - maxSharedClientsPerGPU
+                - strategy
+                type: object
+              gvnic:
+                description: |-
+                  GVNIC configures Google Virtual NIC on every network interface of provisioned nodes.
+                  When unset, GCE chooses the interface type. Mirrors GKE NodeConfig.gvnic
+                  (Terraform node_config.gvnic).
+                properties:
+                  enabled:
+                    description: |-
+                      Enabled selects GVNIC when true and VIRTIO_NET when false on every interface.
+                      GCE rejects a type unsupported by the machine series or node image.
+                    type: boolean
+                required:
+                - enabled
+                type: object
               imageFamily:
                 description: |-
                   ImageFamily dictates the instance template used when generating launch templates.
@@ -214,9 +287,9 @@ spec:
                       - message: ContainerOptimizedOS version must be 'latest' or
                           'milestone.build.build.build' (e.g. '125.19216.104.126')
                         rule: '!self.startsWith(''ContainerOptimizedOS@'') || self.matches(''^ContainerOptimizedOS@(latest|[0-9]+[.][0-9]+[.][0-9]+[.][0-9]+)$'')'
-                      - message: Ubuntu version must be 'latest' or 'vYYYYMMDD' (e.g.
-                          'v20260416')
-                        rule: '!self.startsWith(''Ubuntu@'') || self.matches(''^Ubuntu@(latest|v[0-9]{8})$'')'
+                      - message: Ubuntu version must be 'latest' or 'vYYYYMMDD' with
+                          an optional release letter (e.g. 'v20260416', 'v20251218a')
+                        rule: '!self.startsWith(''Ubuntu@'') || self.matches(''^Ubuntu@(latest|v[0-9]{8}[a-z]?)$'')'
                     channel:
                       description: |-
                         Channel specifies the GKE release channel to follow. Only valid when Family is ContainerOptimizedOS.
@@ -249,7 +322,7 @@ spec:
                       description: |-
                         Version pins the image to a specific version or "latest".
                         For ContainerOptimizedOS: "latest" or "milestone.build.build.build" (e.g. "125.19216.104.126").
-                        For Ubuntu2404/Ubuntu2204: "latest" or "vYYYYMMDD" (e.g. "v20260416").
+                        For Ubuntu2404/Ubuntu2204: "latest" or "vYYYYMMDD" with an optional release letter (e.g. "v20260416", "v20251218a").
                       maxLength: 32
                       type: string
                   type: object
@@ -270,14 +343,14 @@ spec:
                     rule: '!has(self.version) || !has(self.family) || self.family
                       != ''ContainerOptimizedOS'' || self.version == ''latest'' ||
                       self.version.matches(''^[0-9]+[.][0-9]+[.][0-9]+[.][0-9]+$'')'
-                  - message: Ubuntu2404 version must be 'latest' or 'vYYYYMMDD' (e.g.
-                      'v20260416')
+                  - message: Ubuntu2404 version must be 'latest' or 'vYYYYMMDD' with
+                      an optional release letter (e.g. 'v20260416', 'v20251218a')
                     rule: '!has(self.version) || !has(self.family) || self.family
-                      != ''Ubuntu2404'' || self.version == ''latest'' || self.version.matches(''^v[0-9]{8}$'')'
-                  - message: Ubuntu2204 version must be 'latest' or 'vYYYYMMDD' (e.g.
-                      'v20260416')
+                      != ''Ubuntu2404'' || self.version == ''latest'' || self.version.matches(''^v[0-9]{8}[a-z]?$'')'
+                  - message: Ubuntu2204 version must be 'latest' or 'vYYYYMMDD' with
+                      an optional release letter (e.g. 'v20260416', 'v20251218a')
                     rule: '!has(self.version) || !has(self.family) || self.family
-                      != ''Ubuntu2204'' || self.version == ''latest'' || self.version.matches(''^v[0-9]{8}$'')'
+                      != ''Ubuntu2204'' || self.version == ''latest'' || self.version.matches(''^v[0-9]{8}[a-z]?$'')'
                   - message: family 'Ubuntu' is not valid; use Ubuntu2404 for Ubuntu
                       24.04 or Ubuntu2204 for Ubuntu 22.04
                     rule: '!has(self.family) || self.family != ''Ubuntu'''
@@ -356,6 +429,14 @@ spec:
                     x-kubernetes-validations:
                     - message: valid keys for evictionSoftGracePeriod are ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available']
                       rule: self.all(x, x in ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available'])
+                  failSwapOn:
+                    description: |-
+                      FailSwapOn tells the kubelet to fail to start if swap is enabled on the node.
+                      Must be explicitly set to false for memorySwap.swapBehavior LimitedSwap, unless
+                      linuxNodeConfig.swapConfig creates the swap file: the provider then defaults it
+                      to false for the node.
+                      Default: true
+                    type: boolean
                   imageGCHighThresholdPercent:
                     description: |-
                       ImageGCHighThresholdPercent is the percent of disk usage after which image
@@ -412,6 +493,22 @@ spec:
                     format: int32
                     minimum: 0
                     type: integer
+                  memorySwap:
+                    description: |-
+                      MemorySwap configures swap memory available to container workloads. Swap that
+                      the provider creates is requested separately through linuxNodeConfig.swapConfig;
+                      without it, providing a swap device or file is up to the node image or a DaemonSet.
+                    properties:
+                      swapBehavior:
+                        description: |-
+                          SwapBehavior is NoSwap (workloads cannot use swap, the kubelet default) or
+                          LimitedSwap (a container's swap limit is proportionate to its memory request,
+                          for Burstable pods only).
+                        enum:
+                        - NoSwap
+                        - LimitedSwap
+                        type: string
+                    type: object
                   podsPerCore:
                     description: |-
                       PodsPerCore is an override for the number of pods that can run on a worker node
@@ -426,6 +523,30 @@ spec:
                       time. Must be explicitly set to false to set MaxParallelImagePulls above 1.
                       Default: true
                     type: boolean
+                  shutdownGracePeriod:
+                    description: |-
+                      ShutdownGracePeriod is how long the node delays its shutdown so that pods
+                      can terminate, for example when GCE stops or deletes the VM. It turns on
+                      graceful node shutdown. Spot nodes default to 30s; on-demand nodes default
+                      to 0s. Source node pool shutdown settings are not inherited.
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                    type: string
+                    x-kubernetes-validations:
+                    - message: must be a non-negative duration within Go's supported
+                        range
+                      rule: duration(self) >= duration('0s')
+                  shutdownGracePeriodCriticalPods:
+                    description: |-
+                      ShutdownGracePeriodCriticalPods is the part of shutdownGracePeriod
+                      reserved for critical pods, which terminate after all other pods.
+                      Spot nodes default to 15s; on-demand nodes default to 0s. When only
+                      shutdownGracePeriod is set, a larger Spot default is lowered to it.
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                    type: string
+                    x-kubernetes-validations:
+                    - message: must be a non-negative duration within Go's supported
+                        range
+                      rule: duration(self) >= duration('0s')
                   systemReserved:
                     additionalProperties:
                       description: KubeletQuantity is a bounded kubelet resource quantity
@@ -462,6 +583,10 @@ spec:
                   rule: '!has(self.maxParallelImagePulls) || self.maxParallelImagePulls
                     < 2 || (has(self.serializeImagePulls) && self.serializeImagePulls
                     == false)'
+                - message: shutdownGracePeriodCriticalPods requires shutdownGracePeriod
+                    and must not exceed it
+                  rule: '!has(self.shutdownGracePeriodCriticalPods) || (has(self.shutdownGracePeriod)
+                    && duration(self.shutdownGracePeriodCriticalPods) <= duration(self.shutdownGracePeriod))'
               labels:
                 additionalProperties:
                   type: string
@@ -506,6 +631,47 @@ spec:
                         minimum: 1
                         type: integer
                     type: object
+                  swapConfig:
+                    description: |-
+                      SwapConfig configures the swap file that the node creates at boot, before
+                      the kubelet starts. Mirrors GKE node pool linux_node_config.swap_config.
+                    properties:
+                      bootDiskProfile:
+                        description: |-
+                          BootDiskProfile creates the swap file on the boot disk. Omit it to use the
+                          automatic size GKE derives from the machine's memory and the boot disk.
+                        properties:
+                          swapSizeGib:
+                            description: |-
+                              SwapSizeGib is the size of the swap file in GiB. Omit it to use the
+                              automatic size, which GKE derives from the machine's memory: twice the
+                              memory up to 8 GiB, plus 8 GiB above that, at most half of the boot disk.
+                            format: int64
+                            minimum: 1
+                            type: integer
+                        type: object
+                      enabled:
+                        description: |-
+                          Enabled creates the swap file on the node. Defaults to false, which
+                          neither creates a swap file nor inherits the source node pool's swap.
+                        type: boolean
+                      encryptionConfig:
+                        description: |-
+                          EncryptionConfig configures the encryption of the swap file. The swap
+                          file is encrypted with a key that the node generates at boot, unless
+                          encryptionConfig.disabled is true.
+                        properties:
+                          disabled:
+                            description: Disabled turns off the encryption of the
+                              swap file.
+                            type: boolean
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - message: bootDiskProfile and encryptionConfig must not be set
+                        when swapConfig is not enabled
+                      rule: (has(self.enabled) && self.enabled) || (!has(self.bootDiskProfile)
+                        && !has(self.encryptionConfig))
                 type: object
               localSsdMode:
                 default: RawBlock
@@ -536,6 +702,14 @@ spec:
                     in self) && !(''windows-startup-script-ps1'' in self) && !(''common-psm1''
                     in self) && !(''kubeconfig'' in self) && !(''kubelet-config''
                     in self)'
+              minCpuPlatform:
+                description: |-
+                  MinCpuPlatform is the minimum CPU platform for provisioned nodes, for example
+                  "Intel Ice Lake" or "Intel Granite Rapids". GCE schedules the node on that platform or
+                  a newer one. Leave unset to let GCE choose. GCE rejects a platform the machine type does
+                  not offer, so restrict the NodePool to machine types that do.
+                  Mirrors GKE NodeConfig.minCpuPlatform (Terraform node_config.min_cpu_platform).
+                type: string
               networkConfig:
                 description: NetworkConfig allows overriding per-interface network
                   settings for provisioned nodes.
@@ -691,6 +865,36 @@ spec:
             x-kubernetes-validations:
             - message: subnetRangeName and subnetRangeNames are mutually exclusive
               rule: '!(has(self.subnetRangeName) && has(self.subnetRangeNames))'
+            - message: 'linuxNodeConfig.swapConfig.enabled conflicts with kubeletConfiguration.failSwapOn
+                true: the kubelet does not start while swap is active'
+              rule: '!has(self.linuxNodeConfig) || !has(self.linuxNodeConfig.swapConfig)
+                || !has(self.linuxNodeConfig.swapConfig.enabled) || !self.linuxNodeConfig.swapConfig.enabled
+                || !has(self.kubeletConfiguration) || !has(self.kubeletConfiguration.failSwapOn)
+                || !self.kubeletConfiguration.failSwapOn'
+            - message: memorySwap.swapBehavior LimitedSwap requires kubeletConfiguration.failSwapOn
+                to be explicitly set to false unless linuxNodeConfig.swapConfig is
+                enabled
+              rule: '!has(self.kubeletConfiguration) || !has(self.kubeletConfiguration.memorySwap)
+                || !has(self.kubeletConfiguration.memorySwap.swapBehavior) || self.kubeletConfiguration.memorySwap.swapBehavior
+                != ''LimitedSwap'' || (has(self.linuxNodeConfig) && has(self.linuxNodeConfig.swapConfig)
+                && has(self.linuxNodeConfig.swapConfig.enabled) && self.linuxNodeConfig.swapConfig.enabled)
+                || (has(self.kubeletConfiguration.failSwapOn) && self.kubeletConfiguration.failSwapOn
+                == false)'
+            - message: linuxNodeConfig.swapConfig.bootDiskProfile.swapSizeGib must
+                be at most half of the boot disk sizeGiB
+              rule: '!has(self.linuxNodeConfig) || !has(self.linuxNodeConfig.swapConfig)
+                || !has(self.linuxNodeConfig.swapConfig.bootDiskProfile) || !has(self.linuxNodeConfig.swapConfig.bootDiskProfile.swapSizeGib)
+                || !has(self.disks) || self.disks.all(d, !has(d.boot) || !d.boot ||
+                !has(d.sizeGiB) || 2 * self.linuxNodeConfig.swapConfig.bootDiskProfile.swapSizeGib
+                <= d.sizeGiB)'
+            - message: linuxNodeConfig.swapConfig.bootDiskProfile.swapSizeGib must
+                be at most 50GiB when the provider creates the default 100GiB boot
+                disk
+              rule: '!has(self.linuxNodeConfig) || !has(self.linuxNodeConfig.swapConfig)
+                || !has(self.linuxNodeConfig.swapConfig.bootDiskProfile) || !has(self.linuxNodeConfig.swapConfig.bootDiskProfile.swapSizeGib)
+                || (has(self.disks) && self.disks.exists(d, has(d.boot) && d.boot))
+                || self.linuxNodeConfig.swapConfig.bootDiskProfile.swapSizeGib <=
+                50'
           status:
             description: GCENodeClassStatus contains the resolved state of the GCENodeClass
             properties:
